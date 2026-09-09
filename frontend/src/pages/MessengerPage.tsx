@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { Employee, Message, Note, Room, UnreadUser } from "../api/types";
-import { computeMessageUnreadCount, formatUnread, roomTitle } from "../api/types";
+import { computeMessageUnreadCount, formatUnread, isLeftRoom, roomTitle } from "../api/types";
 import { useAuth } from "../auth";
 import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
 import { useUserRealtime, type RealtimePayload } from "../hooks/useUserRealtime";
@@ -35,6 +35,7 @@ export default function MessengerPage() {
   const [roomMenuOpen, setRoomMenuOpen] = useState(false);
   const [kickOpen, setKickOpen] = useState(false);
   const [kickSelected, setKickSelected] = useState<number[]>([]);
+  const [historyDeleteRoomId, setHistoryDeleteRoomId] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const activeRoomIdRef = useRef<number | null>(null);
   const unreadPopoverRef = useRef<HTMLDivElement>(null);
@@ -97,16 +98,41 @@ export default function MessengerPage() {
         const roomId = payload.room_id;
         const removed = payload.removed_ids || [];
         if (roomId == null) return;
-        const iWasRemoved = removed.includes(user.id);
-        if (iWasRemoved) {
+
+        if (payload.action === "dismiss_history" && removed.includes(user.id)) {
           setRooms((prev) => prev.filter((r) => r.id !== roomId));
           if (activeRoomIdRef.current === roomId) {
             setActiveRoomId(null);
             setMessages([]);
           }
+          return;
+        }
+
+        const iWasRemoved = removed.includes(user.id);
+        if (iWasRemoved) {
+          const removedRooms = (payload.removed_rooms || {}) as Record<string, Room>;
+          const myRoom = removedRooms[String(user.id)];
+          setRooms((prev) => {
+            const idx = prev.findIndex((r) => r.id === roomId);
+            const nextRoom: Room = myRoom
+              ? { ...myRoom, unread_count: 0 }
+              : {
+                  ...(prev[idx] || (payload.room as Room)),
+                  membership_status: payload.action === "kick" ? "kicked" : "left",
+                  unread_count: 0,
+                  members: (payload.room as Room | undefined)?.members || (prev[idx]?.members ?? []),
+                };
+            if (idx >= 0) {
+              const copy = [...prev];
+              copy[idx] = { ...copy[idx], ...nextRoom, id: roomId };
+              return copy;
+            }
+            return [nextRoom, ...prev];
+          });
           setRoomMenuOpen(false);
           setKickOpen(false);
           setStatus(payload.action === "kick" ? "채팅방에서 내보내졌습니다" : "채팅방에서 나갔습니다");
+          // Keep history open; system message arrives via separate "message" event
           return;
         }
         const roomData = payload.room as Room | undefined | null;
@@ -117,9 +143,11 @@ export default function MessengerPage() {
                 ? {
                     ...r,
                     ...roomData,
-                    // keep my unread / display_name if server payload used another viewer
+                    // keep my unread / display_name / membership if server payload used another viewer
                     unread_count: r.unread_count,
                     display_name: r.display_name,
+                    membership_status: r.membership_status || "active",
+                    left_at: r.left_at,
                     members: roomData.members || r.members,
                   }
                 : r
@@ -130,13 +158,12 @@ export default function MessengerPage() {
               setMessages((msgs) =>
                 msgs.map((msg) => ({
                   ...msg,
-                  unread_count: computeMessageUnreadCount(msg, roomData.members),
+                  unread_count: msg.is_system ? 0 : computeMessageUnreadCount(msg, roomData.members),
                 }))
               );
             });
           }
         } else {
-          // Fallback: refresh rooms list
           queueMicrotask(() => {
             refreshRooms().catch(console.error);
           });
@@ -196,14 +223,15 @@ export default function MessengerPage() {
         return;
       }
 
-      // Inactive room: bump unread for others' messages only
+      // Inactive room: bump unread for others' messages only (not for left rooms / system)
       if (msg.sender_id === user.id) return;
+      if (msg.is_system) return;
       setRooms((prev) =>
-        prev.map((r) =>
-          r.id === roomId
-            ? { ...r, unread_count: (r.unread_count || 0) + delta }
-            : r
-        )
+        prev.map((r) => {
+          if (r.id !== roomId) return r;
+          if (isLeftRoom(r)) return r;
+          return { ...r, unread_count: (r.unread_count || 0) + delta };
+        })
       );
     },
     [user, markRoomRead, refreshRooms]
@@ -448,13 +476,37 @@ export default function MessengerPage() {
     if (!window.confirm("이 채팅방에서 나가시겠습니까?")) return;
     const roomId = activeRoomId;
     try {
-      await api(`/api/rooms/${roomId}/leave`, { method: "POST" });
-      setRooms((prev) => prev.filter((r) => r.id !== roomId));
-      setActiveRoomId(null);
-      setMessages([]);
+      const room = await api<Room>(`/api/rooms/${roomId}/leave`, { method: "POST" });
+      setRooms((prev) => prev.map((r) => (r.id === room.id ? { ...r, ...room, unread_count: 0 } : r)));
       setStatus("채팅방에서 나갔습니다");
+      // Reload messages so the system line appears even if WS races
+      const msgs = await api<Message[]>(`/api/rooms/${roomId}/messages`);
+      setMessages(msgs);
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "나가기 실패");
+    }
+  }
+
+  function requestDeleteHistory(roomId: number, e?: { stopPropagation(): void; preventDefault(): void }) {
+    e?.stopPropagation();
+    e?.preventDefault();
+    setHistoryDeleteRoomId(roomId);
+  }
+
+  async function confirmDeleteHistory() {
+    const roomId = historyDeleteRoomId;
+    if (roomId == null) return;
+    try {
+      await api(`/api/rooms/${roomId}/history`, { method: "DELETE" });
+      setRooms((prev) => prev.filter((r) => r.id !== roomId));
+      if (activeRoomIdRef.current === roomId) {
+        setActiveRoomId(null);
+        setMessages([]);
+      }
+      setHistoryDeleteRoomId(null);
+      setStatus("채팅 이력을 삭제했습니다");
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : "이력 삭제 실패");
     }
   }
 
@@ -475,13 +527,15 @@ export default function MessengerPage() {
       setKickOpen(false);
       setKickSelected([]);
       setStatus(`${kickSelected.length}명을 내보냈습니다`);
-      // Recompute unread digits for open messages
       setMessages((msgs) =>
         msgs.map((msg) => ({
           ...msg,
-          unread_count: computeMessageUnreadCount(msg, room.members),
+          unread_count: msg.is_system ? 0 : computeMessageUnreadCount(msg, room.members),
         }))
       );
+      // Pull latest so system notifications are present even if WS races
+      const msgs = await api<Message[]>(`/api/rooms/${activeRoomId}/messages`);
+      setMessages(msgs);
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "내보내기 실패");
     }
@@ -538,19 +592,46 @@ export default function MessengerPage() {
         {tab === "chat" && (
           <div className="room-list">
             {rooms.map((r) => {
-              const badge = formatUnread(r.unread_count);
+              const badge = !isLeftRoom(r) ? formatUnread(r.unread_count) : "";
+              const left = isLeftRoom(r);
+              const active = r.id === activeRoomId;
               return (
-                <button
+                <div
                   key={r.id}
-                  className={r.id === activeRoomId ? "room active" : "room"}
-                  onClick={() => setActiveRoomId(r.id)}
+                  className={
+                    "room-row" +
+                    (active ? " active" : "") +
+                    (left ? " room-left" : "")
+                  }
                 >
-                  <span className="room-row-top">
-                    <span className="room-type">{r.room_type === "direct" ? "1:1" : "그룹"}</span>
-                    {badge && <span className="unread-badge">{badge}</span>}
-                  </span>
-                  <strong>{roomTitle(r)}</strong>
-                </button>
+                  <button
+                    type="button"
+                    className={active ? "room active" : "room"}
+                    onClick={() => setActiveRoomId(r.id)}
+                  >
+                    <span className="room-row-top">
+                      <span className="room-type">{r.room_type === "direct" ? "1:1" : "그룹"}</span>
+                      {left ? (
+                        <span className="left-room-badge" title="방에서 나온 채팅">나감</span>
+                      ) : (
+                        badge && <span className="unread-badge">{badge}</span>
+                      )}
+                    </span>
+                    <strong>{roomTitle(r)}</strong>
+                    {left && <span className="left-room-label">방에서 나온 채팅</span>}
+                  </button>
+                  {left && (
+                    <button
+                      type="button"
+                      className="room-dismiss-x"
+                      title="채팅 이력 삭제"
+                      aria-label="채팅 이력 삭제"
+                      onClick={(e) => requestDeleteHistory(r.id, e)}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -595,11 +676,11 @@ export default function MessengerPage() {
                   className="secondary"
                   title="현재 그룹 채팅방에 멤버 초대"
                   onClick={() => openEmployeePicker("invite")}
-                  disabled={!activeRoomId || activeRoom?.room_type === "direct"}
+                  disabled={!activeRoomId || activeRoom?.room_type === "direct" || isLeftRoom(activeRoom)}
                 >
                   직원 선택
                 </button>
-                <button type="button" onClick={inviteBot} disabled={!activeRoomId}>AI 봇 초대</button>
+                <button type="button" onClick={inviteBot} disabled={!activeRoomId || isLeftRoom(activeRoom)}>AI 봇 초대</button>
               </div>
             </div>
 
@@ -623,9 +704,11 @@ export default function MessengerPage() {
                       </button>
                     </div>
                     <div className="muted small">
-                      참여자: {activeRoom.members.map((m) => m.employee.name).join(", ")}
+                      참여자: {activeRoom.members.map((m) => m.employee.name).join(", ") || "(없음)"}
+                      {isLeftRoom(activeRoom) ? " · 방에서 나옴" : ""}
                     </div>
                   </div>
+                  {!isLeftRoom(activeRoom) && (
                   <div className="chat-header-actions" ref={roomMenuRef}>
                     <button
                       type="button"
@@ -657,9 +740,17 @@ export default function MessengerPage() {
                       </div>
                     )}
                   </div>
+                  )}
                 </header>
                 <div className="messages">
                   {messages.map((m) => {
+                    if (m.is_system) {
+                      return (
+                        <div key={m.id} className="msg system">
+                          <div className="system-line">{m.content}</div>
+                        </div>
+                      );
+                    }
                     const mine = m.sender_id === user?.id;
                     const unreadN = m.unread_count || 0;
                     const showUnread = mine && unreadN > 0;
@@ -709,6 +800,11 @@ export default function MessengerPage() {
                   })}
                   <div ref={bottomRef} />
                 </div>
+                {isLeftRoom(activeRoom) ? (
+                  <div className="composer composer-left">
+                    <div className="muted small">방에서 나온 채팅입니다. 메시지를 보낼 수 없습니다.</div>
+                  </div>
+                ) : (
                 <div className="composer">
                   <input
                     value={text}
@@ -718,6 +814,7 @@ export default function MessengerPage() {
                   />
                   <button onClick={sendMessage}>전송</button>
                 </div>
+                )}
               </>
             ) : (
               <div className="center">채팅방을 선택하거나 새로 만드세요</div>
@@ -847,6 +944,22 @@ export default function MessengerPage() {
                 <button type="button" className="secondary" onClick={() => setRenameOpen(false)}>취소</button>
                 <button type="button" onClick={() => saveDisplayName(false)}>저장</button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {historyDeleteRoomId != null && (
+        <div className="modal-overlay" onClick={() => setHistoryDeleteRoomId(null)}>
+          <div className="kick-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-labelledby="history-del-title">
+            <div className="kick-modal-header">
+              <h2 id="history-del-title">채팅 이력 삭제</h2>
+              <button type="button" className="ghost" onClick={() => setHistoryDeleteRoomId(null)} aria-label="닫기">✕</button>
+            </div>
+            <p>채팅 이력을 삭제하시겠습니까?</p>
+            <div className="kick-actions">
+              <button type="button" className="secondary" onClick={() => setHistoryDeleteRoomId(null)}>취소</button>
+              <button type="button" className="danger-solid" onClick={confirmDeleteHistory}>확인</button>
             </div>
           </div>
         </div>

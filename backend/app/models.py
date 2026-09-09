@@ -34,7 +34,7 @@ class Employee(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     department: Mapped[Department | None] = relationship(back_populates="employees")
-    room_memberships: Mapped[list["RoomMember"]] = relationship(back_populates="employee")
+    room_memberships: Mapped[list["RoomMember"]] = relationship(back_populates="employee", foreign_keys="RoomMember.employee_id")
 
 
 class FavoriteEmployee(Base):
@@ -75,9 +75,15 @@ class RoomMember(Base):
     display_name: Mapped[str | None] = mapped_column(String(200), nullable=True, default=None)
     # Messages after this timestamp count as unread for this member
     last_read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    # Soft-leave: active | left | kicked (hard DELETE only on history dismiss)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    left_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    removed_by_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True, default=None)
 
     room: Mapped[Room] = relationship(back_populates="members")
-    employee: Mapped[Employee] = relationship(back_populates="room_memberships")
+    employee: Mapped[Employee] = relationship(
+        back_populates="room_memberships", foreign_keys=[employee_id]
+    )
 
 
 class Message(Base):
@@ -88,9 +94,14 @@ class Message(Base):
     sender_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False)
+    # leave | kick | None — personalize system text per viewer
+    system_event: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
+    system_actor_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True, default=None)
+    system_target_id: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True, default=None)
 
     room: Mapped[Room] = relationship(back_populates="messages")
-    sender: Mapped[Employee] = relationship()
+    sender: Mapped[Employee] = relationship(foreign_keys=[sender_id])
 
 
 class Note(Base):

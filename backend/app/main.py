@@ -71,6 +71,42 @@ def ensure_schema():
                 text("ALTER TABLE room_members ADD COLUMN last_read_at TIMESTAMP")
             )
 
+
+        # room_members soft-leave columns
+        for col, ddl in [
+            ("status", "ALTER TABLE room_members ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active'"),
+            ("left_at", "ALTER TABLE room_members ADD COLUMN left_at TIMESTAMP"),
+            ("removed_by_id", "ALTER TABLE room_members ADD COLUMN removed_by_id INTEGER REFERENCES employees(id)"),
+        ]:
+            row = conn.execute(
+                text(
+                    f"""
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'room_members' AND column_name = '{col}'
+                    """
+                )
+            ).first()
+            if not row:
+                conn.execute(text(ddl))
+
+        # messages system-notification columns
+        for col, ddl in [
+            ("is_system", "ALTER TABLE messages ADD COLUMN is_system BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("system_event", "ALTER TABLE messages ADD COLUMN system_event VARCHAR(20)"),
+            ("system_actor_id", "ALTER TABLE messages ADD COLUMN system_actor_id INTEGER REFERENCES employees(id)"),
+            ("system_target_id", "ALTER TABLE messages ADD COLUMN system_target_id INTEGER REFERENCES employees(id)"),
+        ]:
+            row = conn.execute(
+                text(
+                    f"""
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'messages' AND column_name = '{col}'
+                    """
+                )
+            ).first()
+            if not row:
+                conn.execute(text(ddl))
+
         # Do NOT COALESCE NULL -> now: NULL means never accessed and must count as unread.
         # One-time repair of join-stamp false reads (old create/invite set last_read_at=now).
         conn.execute(

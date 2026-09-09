@@ -16,6 +16,8 @@ export type RealtimePayload = {
   actor_id?: number;
   removed_ids?: number[];
   room?: unknown;
+  removed_rooms?: Record<string, unknown>;
+  system_messages?: unknown[];
 };
 
 /**

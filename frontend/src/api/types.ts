@@ -47,6 +47,9 @@ export interface Room {
   /** Per-user personal alias; null/undefined → use name */
   display_name?: string | null;
   unread_count?: number;
+  /** Viewer membership: active | left | kicked */
+  membership_status?: "active" | "left" | "kicked" | string;
+  left_at?: string | null;
 }
 
 export interface Message {
@@ -58,6 +61,10 @@ export interface Message {
   sender?: Employee | null;
   /** Non-bot members (excluding sender) who have not read yet */
   unread_count?: number;
+  is_system?: boolean;
+  system_event?: string | null;
+  system_actor_id?: number | null;
+  system_target_id?: number | null;
 }
 
 export interface UnreadUser {
@@ -103,4 +110,9 @@ export function computeMessageUnreadCount(
     if (m.last_read_at == null) return true;
     return new Date(m.last_read_at).getTime() < new Date(msg.created_at).getTime();
   }).length;
+}
+
+export function isLeftRoom(room: Room | null | undefined): boolean {
+  const s = room?.membership_status || "active";
+  return s === "left" || s === "kicked";
 }

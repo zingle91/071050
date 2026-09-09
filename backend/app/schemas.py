@@ -79,6 +79,9 @@ class RoomOut(BaseModel):
     # Per-user personal alias; None means fall back to name
     display_name: str | None = None
     unread_count: int = 0
+    # Current viewer's membership: active | left | kicked
+    membership_status: str = "active"
+    left_at: datetime | None = None
 
     class Config:
         from_attributes = True
@@ -111,6 +114,10 @@ class MessageOut(BaseModel):
     sender: EmployeeOut | None = None
     # Members (non-bot, excluding sender) who have not read this message yet
     unread_count: int = 0
+    is_system: bool = False
+    system_event: str | None = None
+    system_actor_id: int | None = None
+    system_target_id: int | None = None
 
     class Config:
         from_attributes = True
