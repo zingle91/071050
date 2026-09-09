@@ -20,3 +20,6 @@ E001-E004 demo password in seed module. AI-BOT no login.
 
 ## Local
 See backend and frontend folders for local run.
+
+## Blocker on Windows hosts
+Docker Desktop is installed but the engine needs WSL2. If wsl -l fails, run admin: wsl --install then reboot, then compose up --build.
