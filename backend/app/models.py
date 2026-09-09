@@ -91,11 +91,21 @@ class RoomMember(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        UniqueConstraint(
+            "room_id",
+            "sender_id",
+            "client_message_id",
+            name="uq_messages_room_sender_client_message_id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     room_id: Mapped[int] = mapped_column(ForeignKey("rooms.id"), nullable=False)
     sender_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # Optional client-supplied idempotency key (UUID / opaque). NULLs are distinct in PG unique.
+    client_message_id: Mapped[str | None] = mapped_column(String(64), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     is_system: Mapped[bool] = mapped_column(Boolean, default=False)
     # leave | kick | None — personalize system text per viewer

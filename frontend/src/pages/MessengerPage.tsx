@@ -50,6 +50,7 @@ export default function MessengerPage() {
   const [activeRoomId, setActiveRoomId] = useState<number | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
   const [inbox, setInbox] = useState<Note[]>([]);
   const [sentNotes, setSentNotes] = useState<Note[]>([]);
   const [notesSubTab, setNotesSubTab] = useState<"inbox" | "sent">("inbox");
@@ -424,13 +425,24 @@ export default function MessengerPage() {
   }
 
   async function sendMessage() {
-    if (!activeRoomId || !text.trim()) return;
-    const content = text;
+    if (!activeRoomId || !text.trim() || sending) return;
+    // Composer only — never prepend/append room history or peer utterances
+    const content = text.trim();
+    if (content.length > 4000) {
+      setStatus("메시지는 4000자를 넘을 수 없습니다");
+      return;
+    }
+    const clientMessageId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `c-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    setSending(true);
     setText("");
     try {
       const msg = await api<Message>(`/api/rooms/${activeRoomId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ content }),
+        headers: { "Idempotency-Key": clientMessageId },
+        body: JSON.stringify({ content, client_message_id: clientMessageId }),
       });
       setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
       setRooms((prev) =>
@@ -440,7 +452,11 @@ export default function MessengerPage() {
         })
       );
     } catch (e) {
+      // Restore draft so user can retry without losing text
+      setText((prev) => prev || content);
       setStatus(e instanceof Error ? e.message : "전송 실패");
+    } finally {
+      setSending(false);
     }
   }
 
@@ -970,9 +986,17 @@ export default function MessengerPage() {
                     value={text}
                     onChange={(e) => setText(e.target.value)}
                     placeholder="메시지 입력 (@AI 또는 ?로 AI 호출)"
-                    onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+                    disabled={sending}
+                    maxLength={4000}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter" || e.nativeEvent.isComposing || sending) return;
+                      e.preventDefault();
+                      void sendMessage();
+                    }}
                   />
-                  <button onClick={sendMessage}>전송</button>
+                  <button type="button" onClick={() => void sendMessage()} disabled={sending || !text.trim()}>
+                    {sending ? "전송 중…" : "전송"}
+                  </button>
                 </div>
                 )}
               </>

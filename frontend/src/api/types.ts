@@ -61,6 +61,8 @@ export interface Message {
   room_id: number;
   sender_id: number;
   content: string;
+  /** Client idempotency key when provided on send */
+  client_message_id?: string | null;
   created_at: string;
   sender?: Employee | null;
   /** Non-bot members (excluding sender) who have not read yet */

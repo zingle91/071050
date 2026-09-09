@@ -105,7 +105,18 @@ class RoomKickRequest(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    content: str
+    """POST body for chat messages. Only `content` (or alias `body`) is stored — never room history."""
+    content: str | None = None
+    body: str | None = Field(None, description="Alias for content")
+    client_message_id: str | None = Field(
+        None,
+        max_length=64,
+        description="Optional idempotency key; unique per (room_id, sender_id)",
+    )
+
+    def resolved_content(self) -> str:
+        raw = self.content if self.content is not None else self.body
+        return (raw or "").strip()
 
 
 class MessageOut(BaseModel):
@@ -113,6 +124,7 @@ class MessageOut(BaseModel):
     room_id: int
     sender_id: int
     content: str
+    client_message_id: str | None = None
     created_at: datetime
     sender: EmployeeOut | None = None
     # Members (non-bot, excluding sender) who have not read this message yet

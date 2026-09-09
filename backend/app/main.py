@@ -108,6 +108,40 @@ def ensure_schema():
             if not row:
                 conn.execute(text(ddl))
 
+        # messages.client_message_id + unique idempotency index
+        row = conn.execute(
+            text(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'messages' AND column_name = 'client_message_id'
+                """
+            )
+        ).first()
+        if not row:
+            conn.execute(
+                text("ALTER TABLE messages ADD COLUMN client_message_id VARCHAR(64)")
+            )
+        idx = conn.execute(
+            text(
+                """
+                SELECT 1 FROM pg_indexes
+                WHERE tablename = 'messages'
+                  AND indexname = 'uq_messages_room_sender_client_message_id'
+                """
+            )
+        ).first()
+        if not idx:
+            # Partial unique: only enforce when client_message_id is present
+            conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX uq_messages_room_sender_client_message_id
+                    ON messages (room_id, sender_id, client_message_id)
+                    WHERE client_message_id IS NOT NULL
+                    """
+                )
+            )
+
         # rooms.public_id — stable UUID identity (display names are NOT unique / may collide)
         row = conn.execute(
             text(

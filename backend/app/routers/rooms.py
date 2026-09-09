@@ -1,10 +1,12 @@
 """Room/membership/message API with soft-leave and system notifications."""
+import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user
@@ -537,13 +539,85 @@ def list_unreaders(
     return result
 
 
+
+# Chat message content limits / light hardening (never auto-append room history)
+_MESSAGE_MAX_LEN = 4000
+_DEDUPE_WINDOW_SEC = 3
+# Reject note-style multi-speaker history dumps pasted as a single chat message
+_HISTORY_DUMP_RE = re.compile(
+    r"(?m)^\s*-\s*.{0,40}:\s+.+$",
+)
+
+
+def _normalize_message_content(raw: str) -> str:
+    """Store only the intended utterance: trim; do not prefix room history."""
+    content = (raw or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="메시지 내용이 비어 있습니다")
+    if len(content) > _MESSAGE_MAX_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"메시지는 {_MESSAGE_MAX_LEN}자를 넘을 수 없습니다",
+        )
+    # Note-summary dumps: several "- role: text" lines → reject (do not silently mash)
+    hist_lines = _HISTORY_DUMP_RE.findall(content)
+    if len(hist_lines) >= 3:
+        raise HTTPException(
+            status_code=400,
+            detail="채팅 메시지에 대화 이력 요약 형식을 넣을 수 없습니다. 한 문장/한 발화만 전송하세요",
+        )
+    return content
+
+
+def _find_by_client_message_id(
+    db: Session, room_id: int, sender_id: int, client_message_id: str
+) -> Message | None:
+    return (
+        db.query(Message)
+        .options(joinedload(Message.sender))
+        .filter(
+            Message.room_id == room_id,
+            Message.sender_id == sender_id,
+            Message.client_message_id == client_message_id,
+        )
+        .first()
+    )
+
+
+def _find_recent_duplicate(
+    db: Session, room_id: int, sender_id: int, content: str, window_sec: int = _DEDUPE_WINDOW_SEC
+) -> Message | None:
+    """Same sender+room+identical body within a short window (retry / double-submit)."""
+    since = datetime.utcnow() - timedelta(seconds=window_sec)
+    return (
+        db.query(Message)
+        .options(joinedload(Message.sender))
+        .filter(
+            Message.room_id == room_id,
+            Message.sender_id == sender_id,
+            Message.content == content,
+            Message.is_system == False,  # noqa: E712
+            Message.created_at >= since,
+        )
+        .order_by(Message.created_at.desc())
+        .first()
+    )
+
+
 @router.post("/{room_id}/messages", response_model=MessageOut)
 async def post_message(
     room_id: int,
     body: MessageCreate,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[Employee, Depends(get_current_user)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
+    """Create a chat message.
+
+    Stores only the request content/body string (trimmed). Never appends room
+    history or other users' utterances. Supports idempotency via
+    ``client_message_id`` / ``Idempotency-Key`` and a short identical-body window.
+    """
     from app.llm import generate_reply
 
     membership = _active_membership(db, room_id, current_user.id)
@@ -553,13 +627,47 @@ async def post_message(
         if any_m:
             raise HTTPException(status_code=403, detail="이미 나간 채팅방에서는 메시지를 보낼 수 없습니다")
         raise HTTPException(status_code=403, detail="해당 채팅방 권한이 없습니다")
-    if not body.content.strip():
-        raise HTTPException(status_code=400, detail="메시지 내용이 비어 있습니다")
 
-    msg = Message(room_id=room_id, sender_id=current_user.id, content=body.content.strip())
+    content = _normalize_message_content(body.resolved_content())
+    client_key = (body.client_message_id or idempotency_key or "").strip() or None
+    if client_key and len(client_key) > 64:
+        raise HTTPException(status_code=400, detail="client_message_id / Idempotency-Key는 64자 이하여야 합니다")
+
+    members = _load_room_members(db, room_id, active_only=True)
+
+    # 1) Explicit idempotency key → return existing row
+    if client_key:
+        existing = _find_by_client_message_id(db, room_id, current_user.id, client_key)
+        if existing:
+            return _message_out(existing, members, viewer_id=current_user.id, db=db)
+
+    # 2) Short-window dedupe (retry / double-click without a key)
+    dup = _find_recent_duplicate(db, room_id, current_user.id, content)
+    if dup:
+        return _message_out(dup, members, viewer_id=current_user.id, db=db)
+
+    msg = Message(
+        room_id=room_id,
+        sender_id=current_user.id,
+        content=content,  # exact intended string only — no history concat
+        client_message_id=client_key,
+    )
     db.add(msg)
     membership.last_read_at = datetime.utcnow()
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        # Concurrent retry with same client_message_id
+        if client_key:
+            existing = _find_by_client_message_id(db, room_id, current_user.id, client_key)
+            if existing:
+                return _message_out(existing, members, viewer_id=current_user.id, db=db)
+        dup = _find_recent_duplicate(db, room_id, current_user.id, content, window_sec=10)
+        if dup:
+            return _message_out(dup, members, viewer_id=current_user.id, db=db)
+        raise HTTPException(status_code=409, detail="메시지 저장 충돌이 발생했습니다. 다시 시도하세요")
+
     db.refresh(msg)
     msg = (
         db.query(Message)
@@ -581,13 +689,12 @@ async def post_message(
             )
             .first()
         )
-        text = body.content
         should_reply = bot_in_room and (
-            "@AI" in text or "@ai" in text or "AI 도우미" in text or text.strip().startswith("?")
+            "@AI" in content or "@ai" in content or "AI 도우미" in content or content.startswith("?")
         )
         if should_reply and current_user.id != bot.id:
             room = db.query(Room).filter(Room.id == room_id).first()
-            reply_text = await generate_reply(text, room.name if room else "")
+            reply_text = await generate_reply(content, room.name if room else "")
             bot_msg = Message(room_id=room_id, sender_id=bot.id, content=reply_text)
             db.add(bot_msg)
             db.commit()
