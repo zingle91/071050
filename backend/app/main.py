@@ -72,18 +72,36 @@ def ensure_schema():
             )
 
         # Do NOT COALESCE NULL -> now: NULL means never accessed and must count as unread.
-        # Repair join-stamp false reads: last_read_at was set to joined_at on create/invite
-        # and never advanced via mark-read/send. Treat as never accessed.
+        # One-time repair of join-stamp false reads (old create/invite set last_read_at=now).
         conn.execute(
             text(
                 """
-                UPDATE room_members
-                SET last_read_at = NULL
-                WHERE last_read_at IS NOT NULL
-                  AND ABS(EXTRACT(EPOCH FROM (last_read_at - joined_at))) < 2
+                CREATE TABLE IF NOT EXISTS schema_flags (
+                    flag VARCHAR(100) PRIMARY KEY,
+                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
                 """
             )
         )
+        flag = conn.execute(
+            text("SELECT 1 FROM schema_flags WHERE flag = 'null_join_stamp_last_read'")
+        ).first()
+        if not flag:
+            conn.execute(
+                text(
+                    """
+                    UPDATE room_members
+                    SET last_read_at = NULL
+                    WHERE last_read_at IS NOT NULL
+                      AND ABS(EXTRACT(EPOCH FROM (last_read_at - joined_at))) < 2
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO schema_flags(flag) VALUES ('null_join_stamp_last_read')"
+                )
+            )
 
 
 @asynccontextmanager
