@@ -32,9 +32,13 @@ export default function MessengerPage() {
   const [unreadPopoverMsgId, setUnreadPopoverMsgId] = useState<number | null>(null);
   const [unreadUsers, setUnreadUsers] = useState<UnreadUser[]>([]);
   const [unreadLoading, setUnreadLoading] = useState(false);
+  const [roomMenuOpen, setRoomMenuOpen] = useState(false);
+  const [kickOpen, setKickOpen] = useState(false);
+  const [kickSelected, setKickSelected] = useState<number[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const activeRoomIdRef = useRef<number | null>(null);
   const unreadPopoverRef = useRef<HTMLDivElement>(null);
+  const roomMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     activeRoomIdRef.current = activeRoomId;
@@ -88,6 +92,57 @@ export default function MessengerPage() {
   const onRealtime = useCallback(
     (payload: RealtimePayload) => {
       if (!user) return;
+
+      if (payload.type === "membership_change") {
+        const roomId = payload.room_id;
+        const removed = payload.removed_ids || [];
+        if (roomId == null) return;
+        const iWasRemoved = removed.includes(user.id);
+        if (iWasRemoved) {
+          setRooms((prev) => prev.filter((r) => r.id !== roomId));
+          if (activeRoomIdRef.current === roomId) {
+            setActiveRoomId(null);
+            setMessages([]);
+          }
+          setRoomMenuOpen(false);
+          setKickOpen(false);
+          setStatus(payload.action === "kick" ? "채팅방에서 내보내졌습니다" : "채팅방에서 나갔습니다");
+          return;
+        }
+        const roomData = payload.room as Room | undefined | null;
+        if (roomData && typeof roomData === "object" && "id" in roomData) {
+          setRooms((prev) =>
+            prev.map((r) =>
+              r.id === roomId
+                ? {
+                    ...r,
+                    ...roomData,
+                    // keep my unread / display_name if server payload used another viewer
+                    unread_count: r.unread_count,
+                    display_name: r.display_name,
+                    members: roomData.members || r.members,
+                  }
+                : r
+            )
+          );
+          if (activeRoomIdRef.current === roomId && roomData.members) {
+            queueMicrotask(() => {
+              setMessages((msgs) =>
+                msgs.map((msg) => ({
+                  ...msg,
+                  unread_count: computeMessageUnreadCount(msg, roomData.members),
+                }))
+              );
+            });
+          }
+        } else {
+          // Fallback: refresh rooms list
+          queueMicrotask(() => {
+            refreshRooms().catch(console.error);
+          });
+        }
+        return;
+      }
 
       if (payload.type === "read_update") {
         const roomId = payload.room_id;
@@ -151,7 +206,7 @@ export default function MessengerPage() {
         )
       );
     },
-    [user, markRoomRead]
+    [user, markRoomRead, refreshRooms]
   );
 
   useUserRealtime(!!user, onRealtime);
@@ -159,6 +214,8 @@ export default function MessengerPage() {
   useEffect(() => {
     if (!activeRoomId) return;
     setUnreadPopoverMsgId(null);
+    setRoomMenuOpen(false);
+    setKickOpen(false);
     api<Message[]>(`/api/rooms/${activeRoomId}/messages`)
       .then(setMessages)
       .catch(console.error);
@@ -189,6 +246,24 @@ export default function MessengerPage() {
       document.removeEventListener("keydown", onKey);
     };
   }, [unreadPopoverMsgId]);
+
+  useEffect(() => {
+    if (!roomMenuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (roomMenuRef.current && !roomMenuRef.current.contains(e.target as Node)) {
+        setRoomMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setRoomMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [roomMenuOpen]);
 
   async function openUnreadPopover(msg: Message) {
     if (!activeRoomId || !msg.unread_count) return;
@@ -367,6 +442,51 @@ export default function MessengerPage() {
     }
   }
 
+  async function leaveActiveRoom() {
+    if (!activeRoomId) return;
+    setRoomMenuOpen(false);
+    if (!window.confirm("이 채팅방에서 나가시겠습니까?")) return;
+    const roomId = activeRoomId;
+    try {
+      await api(`/api/rooms/${roomId}/leave`, { method: "POST" });
+      setRooms((prev) => prev.filter((r) => r.id !== roomId));
+      setActiveRoomId(null);
+      setMessages([]);
+      setStatus("채팅방에서 나갔습니다");
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "나가기 실패");
+    }
+  }
+
+  function openKickDialog() {
+    setRoomMenuOpen(false);
+    setKickSelected([]);
+    setKickOpen(true);
+  }
+
+  async function confirmKick() {
+    if (!activeRoomId || !kickSelected.length) return;
+    try {
+      const room = await api<Room>(`/api/rooms/${activeRoomId}/kick`, {
+        method: "POST",
+        body: JSON.stringify({ member_ids: kickSelected }),
+      });
+      setRooms((prev) => prev.map((r) => (r.id === room.id ? { ...r, ...room } : r)));
+      setKickOpen(false);
+      setKickSelected([]);
+      setStatus(`${kickSelected.length}명을 내보냈습니다`);
+      // Recompute unread digits for open messages
+      setMessages((msgs) =>
+        msgs.map((msg) => ({
+          ...msg,
+          unread_count: computeMessageUnreadCount(msg, room.members),
+        }))
+      );
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "내보내기 실패");
+    }
+  }
+
   function handlePickerConfirm(users: PickedUser[]) {
     const mode = pickerMode;
     setPickerMode(null);
@@ -486,23 +606,56 @@ export default function MessengerPage() {
             {activeRoom ? (
               <>
                 <header className="chat-header">
-                  <div className="chat-header-title">
-                    <h2>{roomTitle(activeRoom)}</h2>
+                  <div className="chat-header-main">
+                    <div className="chat-header-title">
+                      <h2>{roomTitle(activeRoom)}</h2>
+                      <button
+                        type="button"
+                        className="icon-edit-btn"
+                        title="채팅방 이름 편집 (나만 보임)"
+                        aria-label="채팅방 이름 편집"
+                        onClick={openRenameDialog}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M12 20h9" />
+                          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                        </svg>
+                      </button>
+                    </div>
+                    <div className="muted small">
+                      참여자: {activeRoom.members.map((m) => m.employee.name).join(", ")}
+                    </div>
+                  </div>
+                  <div className="chat-header-actions" ref={roomMenuRef}>
                     <button
                       type="button"
-                      className="icon-edit-btn"
-                      title="채팅방 이름 편집 (나만 보임)"
-                      aria-label="채팅방 이름 편집"
-                      onClick={openRenameDialog}
+                      className="chat-menu-btn"
+                      title="메뉴"
+                      aria-label="채팅방 메뉴"
+                      aria-expanded={roomMenuOpen}
+                      onClick={() => setRoomMenuOpen((v) => !v)}
                     >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M12 20h9" />
-                        <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <circle cx="12" cy="5" r="2" />
+                        <circle cx="12" cy="12" r="2" />
+                        <circle cx="12" cy="19" r="2" />
                       </svg>
                     </button>
-                  </div>
-                  <div className="muted small">
-                    참여자: {activeRoom.members.map((m) => m.employee.name).join(", ")}
+                    {roomMenuOpen && (
+                      <div className="chat-menu-dropdown" role="menu">
+                        <button type="button" role="menuitem" className="danger" onClick={leaveActiveRoom}>
+                          나가기
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={openKickDialog}
+                          disabled={activeRoom.members.filter((m) => m.employee_id !== user?.id).length === 0}
+                        >
+                          내보내기
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </header>
                 <div className="messages">
@@ -694,6 +847,53 @@ export default function MessengerPage() {
                 <button type="button" className="secondary" onClick={() => setRenameOpen(false)}>취소</button>
                 <button type="button" onClick={() => saveDisplayName(false)}>저장</button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {kickOpen && activeRoom && (
+        <div className="modal-overlay" onClick={() => setKickOpen(false)}>
+          <div className="kick-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-labelledby="kick-title">
+            <div className="kick-modal-header">
+              <h2 id="kick-title">멤버 내보내기</h2>
+              <button type="button" className="ghost" onClick={() => setKickOpen(false)} aria-label="닫기">✕</button>
+            </div>
+            <p className="muted small">내보낼 참여자를 선택하세요. (본인은 나가기로 퇴장합니다)</p>
+            <ul className="kick-member-list">
+              {activeRoom.members
+                .filter((m) => m.employee_id !== user?.id)
+                .map((m) => {
+                  const checked = kickSelected.includes(m.employee_id);
+                  return (
+                    <li key={m.id}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() =>
+                            setKickSelected((prev) =>
+                              checked
+                                ? prev.filter((id) => id !== m.employee_id)
+                                : [...prev, m.employee_id]
+                            )
+                          }
+                        />
+                        <span>
+                          {m.employee.name}
+                          {m.employee.is_bot ? " 🤖" : ""}
+                          <span className="muted small"> · {m.employee.employee_id}</span>
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+            </ul>
+            <div className="kick-actions">
+              <button type="button" className="secondary" onClick={() => setKickOpen(false)}>취소</button>
+              <button type="button" onClick={confirmKick} disabled={!kickSelected.length}>
+                내보내기{kickSelected.length ? ` (${kickSelected.length})` : ""}
+              </button>
             </div>
           </div>
         </div>

@@ -260,3 +260,81 @@ button.ghost { background: transparent; color: #64748b; padding: 0.35rem 0.55rem
 }
 .msg-unread-name { font-weight: 600; color: #0f172a; }
 .msg-unread-emp { flex-shrink: 0; }
+
+
+/* --- room header hamburger (leave / kick) --- */
+.chat-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.chat-header-main { min-width: 0; flex: 1; }
+.chat-header-actions { position: relative; flex-shrink: 0; }
+.chat-menu-btn {
+  display: inline-grid; place-items: center;
+  width: 34px; height: 34px; padding: 0;
+  border-radius: 8px;
+  background: #f1f5f9;
+  color: #334155;
+  border: 1px solid #cbd5e1;
+}
+.chat-menu-btn:hover { background: #e2e8f0; color: #0f172a; }
+.chat-menu-dropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  min-width: 160px;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+  padding: 0.35rem;
+  display: grid;
+  gap: 0.15rem;
+}
+.chat-menu-dropdown button {
+  background: transparent;
+  color: #0f172a;
+  text-align: left;
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+}
+.chat-menu-dropdown button:hover { background: #f1f5f9; }
+.chat-menu-dropdown button.danger { color: #b91c1c; }
+.chat-menu-dropdown button.danger:hover { background: #fef2f2; }
+
+.kick-modal {
+  width: min(420px, 94vw);
+  max-height: min(560px, 90vh);
+  background: white;
+  border-radius: 14px;
+  box-shadow: 0 25px 60px rgba(0,0,0,.25);
+  padding: 1rem 1.1rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.kick-modal-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+}
+.kick-modal-header h2 { margin: 0; font-size: 1.1rem; }
+.kick-member-list {
+  list-style: none; margin: 0; padding: 0;
+  overflow: auto; flex: 1; min-height: 120px;
+  display: grid; gap: 0.25rem;
+}
+.kick-member-list li {
+  display: flex; align-items: center; gap: 0.55rem;
+  padding: 0.45rem 0.5rem; border-radius: 8px;
+}
+.kick-member-list li:hover { background: #f8fafc; }
+.kick-member-list label {
+  display: flex; align-items: center; gap: 0.55rem;
+  flex: 1; cursor: pointer; min-width: 0;
+}
+.kick-member-list input { width: auto; }
+.kick-actions {
+  display: flex; justify-content: flex-end; gap: 0.5rem;
+}

@@ -57,7 +57,7 @@ def ensure_schema():
                 text("ALTER TABLE room_members ADD COLUMN display_name VARCHAR(200)")
             )
 
-        # room_members.last_read_at (unread baseline)
+        # room_members.last_read_at (unread baseline; NULL = never accessed)
         row = conn.execute(
             text(
                 """
@@ -71,10 +71,17 @@ def ensure_schema():
                 text("ALTER TABLE room_members ADD COLUMN last_read_at TIMESTAMP")
             )
 
-        # Backfill last_read_at so existing history is not all unread
+        # Do NOT COALESCE NULL -> now: NULL means never accessed and must count as unread.
+        # Repair join-stamp false reads: last_read_at was set to joined_at on create/invite
+        # and never advanced via mark-read/send. Treat as never accessed.
         conn.execute(
             text(
-                "UPDATE room_members SET last_read_at = COALESCE(last_read_at, CURRENT_TIMESTAMP)"
+                """
+                UPDATE room_members
+                SET last_read_at = NULL
+                WHERE last_read_at IS NOT NULL
+                  AND ABS(EXTRACT(EPOCH FROM (last_read_at - joined_at))) < 2
+                """
             )
         )
 

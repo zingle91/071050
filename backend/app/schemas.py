@@ -94,6 +94,10 @@ class RoomInviteRequest(BaseModel):
     member_ids: list[int]
 
 
+class RoomKickRequest(BaseModel):
+    member_ids: list[int]
+
+
 class MessageCreate(BaseModel):
     content: str
 

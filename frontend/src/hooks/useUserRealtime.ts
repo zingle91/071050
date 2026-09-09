@@ -12,6 +12,10 @@ export type RealtimePayload = {
   unread_delta?: number;
   user_id?: number;
   last_read_at?: string | null;
+  action?: string;
+  actor_id?: number;
+  removed_ids?: number[];
+  room?: unknown;
 };
 
 /**
