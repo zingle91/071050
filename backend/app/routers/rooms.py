@@ -17,6 +17,7 @@ from app.schemas import (
     InviteBotRequest,
     RoomInviteRequest,
     RoomDisplayNameUpdate,
+    UnreadUserOut,
 )
 
 router = APIRouter(prefix="/api/rooms", tags=["rooms"])
@@ -43,6 +44,45 @@ def _unread_count(db: Session, room_id: int, user_id: int, last_read_at: datetim
     if last_read_at is not None:
         q = q.filter(Message.created_at > last_read_at)
     return int(q.scalar() or 0)
+
+
+def _load_room_members(db: Session, room_id: int) -> list[RoomMember]:
+    return (
+        db.query(RoomMember)
+        .options(joinedload(RoomMember.employee))
+        .filter(RoomMember.room_id == room_id)
+        .all()
+    )
+
+
+def _member_has_read(member: RoomMember, msg: Message) -> bool:
+    if member.last_read_at is None:
+        return False
+    return member.last_read_at >= msg.created_at
+
+
+def _iter_unreader_members(members: list[RoomMember], msg: Message) -> list[RoomMember]:
+    """Members who have not read msg: exclude sender and bots."""
+    out: list[RoomMember] = []
+    for m in members:
+        if m.employee_id == msg.sender_id:
+            continue
+        emp = m.employee
+        if emp is not None and emp.is_bot:
+            continue
+        if _member_has_read(m, msg):
+            continue
+        out.append(m)
+    return out
+
+
+def _message_unread_count(members: list[RoomMember], msg: Message) -> int:
+    return len(_iter_unreader_members(members, msg))
+
+
+def _message_out(msg: Message, members: list[RoomMember]) -> MessageOut:
+    base = MessageOut.model_validate(msg)
+    return base.model_copy(update={"unread_count": _message_unread_count(members, msg)})
 
 
 def _room_out(room: Room, user_id: int, db: Session) -> RoomOut:
@@ -72,6 +112,27 @@ def _load_room(db: Session, room_id: int) -> Room:
     )
 
 
+async def _broadcast_read_update(
+    db: Session, room_id: int, user_id: int, last_read_at: datetime
+):
+    """Notify room members that a peer marked messages as read (live unread digits)."""
+    from app.ws_manager import manager
+
+    event = {
+        "type": "read_update",
+        "room_id": room_id,
+        "user_id": user_id,
+        "last_read_at": last_read_at.isoformat() if last_read_at else None,
+    }
+    await manager.broadcast(room_id, event)
+    member_ids = [
+        m.employee_id
+        for m in db.query(RoomMember).filter(RoomMember.room_id == room_id).all()
+    ]
+    if member_ids:
+        await manager.notify_users(member_ids, event)
+
+
 async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender_id: int):
     """Fan-out to room sockets (legacy) and every member's /ws/user channel.
 
@@ -80,7 +141,8 @@ async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender
     """
     from app.ws_manager import manager
 
-    payload = MessageOut.model_validate(msg).model_dump(mode="json")
+    members = _load_room_members(db, room_id)
+    payload = _message_out(msg, members).model_dump(mode="json")
     event = {
         "type": "message",
         "room_id": room_id,
@@ -89,10 +151,7 @@ async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender
     }
     await manager.broadcast(room_id, event)
 
-    member_ids = [
-        m.employee_id
-        for m in db.query(RoomMember).filter(RoomMember.room_id == room_id).all()
-    ]
+    member_ids = [m.employee_id for m in members]
     if member_ids:
         await manager.notify_users(member_ids, event)
 
@@ -178,7 +237,7 @@ def update_display_name(
 
 
 @router.post("/{room_id}/read", response_model=RoomOut)
-def mark_room_read(
+async def mark_room_read(
     room_id: int,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[Employee, Depends(get_current_user)],
@@ -188,6 +247,8 @@ def mark_room_read(
         raise HTTPException(status_code=403, detail="해당 채팅방 권한이 없습니다")
     membership.last_read_at = datetime.utcnow()
     db.commit()
+    db.refresh(membership)
+    await _broadcast_read_update(db, room_id, current_user.id, membership.last_read_at)
     return _room_out(_load_room(db, room_id), current_user.id, db)
 
 
@@ -199,7 +260,8 @@ def list_messages(
 ):
     if room_id not in _user_room_ids(db, current_user.id):
         raise HTTPException(status_code=403, detail="해당 채팅방 권한이 없습니다")
-    return (
+    members = _load_room_members(db, room_id)
+    msgs = (
         db.query(Message)
         .options(joinedload(Message.sender))
         .filter(Message.room_id == room_id)
@@ -207,6 +269,45 @@ def list_messages(
         .limit(500)
         .all()
     )
+    return [_message_out(m, members) for m in msgs]
+
+
+@router.get(
+    "/{room_id}/messages/{msg_id}/unreaders",
+    response_model=list[UnreadUserOut],
+)
+def list_unreaders(
+    room_id: int,
+    msg_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[Employee, Depends(get_current_user)],
+):
+    """People who have not yet read this message (for the unread-count popup)."""
+    if room_id not in _user_room_ids(db, current_user.id):
+        raise HTTPException(status_code=403, detail="해당 채팅방 권한이 없습니다")
+    msg = (
+        db.query(Message)
+        .filter(Message.id == msg_id, Message.room_id == room_id)
+        .first()
+    )
+    if not msg:
+        raise HTTPException(status_code=404, detail="메시지를 찾을 수 없습니다")
+    members = _load_room_members(db, room_id)
+    unreaders = _iter_unreader_members(members, msg)
+    result: list[UnreadUserOut] = []
+    for m in unreaders:
+        emp = m.employee
+        if not emp:
+            continue
+        result.append(
+            UnreadUserOut(
+                id=emp.id,
+                employee_id=emp.employee_id,
+                name=emp.name,
+                is_bot=bool(emp.is_bot),
+            )
+        )
+    return result
 
 
 @router.post("/{room_id}/messages", response_model=MessageOut)
@@ -237,6 +338,8 @@ async def post_message(
         .one()
     )
     await _broadcast_new_message(db, room_id, msg, current_user.id)
+    # Peers should refresh unread digits when sender's last_read advances too
+    await _broadcast_read_update(db, room_id, current_user.id, membership.last_read_at)
 
     bot = db.query(Employee).filter(Employee.is_bot == True).first()  # noqa: E712
     if bot:
@@ -263,7 +366,8 @@ async def post_message(
             )
             await _broadcast_new_message(db, room_id, bot_msg, bot.id)
 
-    return msg
+    members = _load_room_members(db, room_id)
+    return _message_out(msg, members)
 
 
 @router.post("/{room_id}/members", response_model=RoomOut)

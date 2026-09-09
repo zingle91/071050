@@ -64,6 +64,7 @@ class RoomMemberOut(BaseModel):
     id: int
     employee_id: int
     employee: EmployeeOut
+    last_read_at: datetime | None = None
 
     class Config:
         from_attributes = True
@@ -104,9 +105,18 @@ class MessageOut(BaseModel):
     content: str
     created_at: datetime
     sender: EmployeeOut | None = None
+    # Members (non-bot, excluding sender) who have not read this message yet
+    unread_count: int = 0
 
     class Config:
         from_attributes = True
+
+
+class UnreadUserOut(BaseModel):
+    id: int
+    employee_id: str
+    name: str
+    is_bot: bool = False
 
 
 class NoteCreate(BaseModel):

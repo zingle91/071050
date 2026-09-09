@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { Employee, Message, Note, Room } from "../api/types";
-import { formatUnread, roomTitle } from "../api/types";
+import type { Employee, Message, Note, Room, UnreadUser } from "../api/types";
+import { computeMessageUnreadCount, formatUnread, roomTitle } from "../api/types";
 import { useAuth } from "../auth";
 import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
 import { useUserRealtime, type RealtimePayload } from "../hooks/useUserRealtime";
@@ -29,8 +29,12 @@ export default function MessengerPage() {
   const [pickerMode, setPickerMode] = useState<PickerMode>(null);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [unreadPopoverMsgId, setUnreadPopoverMsgId] = useState<number | null>(null);
+  const [unreadUsers, setUnreadUsers] = useState<UnreadUser[]>([]);
+  const [unreadLoading, setUnreadLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const activeRoomIdRef = useRef<number | null>(null);
+  const unreadPopoverRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     activeRoomIdRef.current = activeRoomId;
@@ -80,10 +84,45 @@ export default function MessengerPage() {
     refreshNotes().catch(console.error);
   }, [refreshRooms, refreshEmployees, refreshNotes]);
 
-  // Single user-level WebSocket: center append + sidebar unread (no polling, no per-room socket)
+  // Single user-level WebSocket: center append + sidebar unread + read receipts
   const onRealtime = useCallback(
     (payload: RealtimePayload) => {
-      if (payload.type !== "message" || !payload.data || !user) return;
+      if (!user) return;
+
+      if (payload.type === "read_update") {
+        const roomId = payload.room_id;
+        const readerId = payload.user_id;
+        const lastReadAt = payload.last_read_at ?? null;
+        if (roomId == null || readerId == null) return;
+
+        setRooms((prev) => {
+          const next = prev.map((r) => {
+            if (r.id !== roomId) return r;
+            return {
+              ...r,
+              members: r.members.map((m) =>
+                m.employee_id === readerId ? { ...m, last_read_at: lastReadAt } : m
+              ),
+            };
+          });
+          const room = next.find((r) => r.id === roomId);
+          if (room && activeRoomIdRef.current === roomId) {
+            const members = room.members;
+            queueMicrotask(() => {
+              setMessages((msgs) =>
+                msgs.map((msg) => ({
+                  ...msg,
+                  unread_count: computeMessageUnreadCount(msg, members),
+                }))
+              );
+            });
+          }
+          return next;
+        });
+        return;
+      }
+
+      if (payload.type !== "message" || !payload.data) return;
       const msg = payload.data as Message;
       const roomId = msg.room_id ?? payload.room_id;
       if (roomId == null) return;
@@ -119,6 +158,7 @@ export default function MessengerPage() {
 
   useEffect(() => {
     if (!activeRoomId) return;
+    setUnreadPopoverMsgId(null);
     api<Message[]>(`/api/rooms/${activeRoomId}/messages`)
       .then(setMessages)
       .catch(console.error);
@@ -130,6 +170,47 @@ export default function MessengerPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Close unread popover on outside click / Escape
+  useEffect(() => {
+    if (unreadPopoverMsgId == null) return;
+    const onDown = (e: MouseEvent) => {
+      if (unreadPopoverRef.current && !unreadPopoverRef.current.contains(e.target as Node)) {
+        setUnreadPopoverMsgId(null);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setUnreadPopoverMsgId(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [unreadPopoverMsgId]);
+
+  async function openUnreadPopover(msg: Message) {
+    if (!activeRoomId || !msg.unread_count) return;
+    if (unreadPopoverMsgId === msg.id) {
+      setUnreadPopoverMsgId(null);
+      return;
+    }
+    setUnreadPopoverMsgId(msg.id);
+    setUnreadUsers([]);
+    setUnreadLoading(true);
+    try {
+      const users = await api<UnreadUser[]>(
+        `/api/rooms/${activeRoomId}/messages/${msg.id}/unreaders`
+      );
+      setUnreadUsers(users);
+    } catch (e) {
+      console.error(e);
+      setUnreadUsers([]);
+    } finally {
+      setUnreadLoading(false);
+    }
+  }
 
   async function sendMessage() {
     if (!activeRoomId || !text.trim()) return;
@@ -425,15 +506,54 @@ export default function MessengerPage() {
                   </div>
                 </header>
                 <div className="messages">
-                  {messages.map((m) => (
-                    <div key={m.id} className={m.sender_id === user?.id ? "msg mine" : "msg"}>
-                      <div className="meta">
-                        {m.sender?.name || m.sender_id}
-                        {m.sender?.is_bot ? " 🤖" : ""} · {new Date(m.created_at).toLocaleString()}
+                  {messages.map((m) => {
+                    const mine = m.sender_id === user?.id;
+                    const unreadN = m.unread_count || 0;
+                    const showUnread = mine && unreadN > 0;
+                    return (
+                      <div key={m.id} className={mine ? "msg mine" : "msg"}>
+                        <div className="meta">
+                          {m.sender?.name || m.sender_id}
+                          {m.sender?.is_bot ? " 🤖" : ""} · {new Date(m.created_at).toLocaleString()}
+                        </div>
+                        <div className="bubble-row">
+                          {showUnread && (
+                            <div className="msg-unread-wrap" ref={unreadPopoverMsgId === m.id ? unreadPopoverRef : undefined}>
+                              <button
+                                type="button"
+                                className="msg-unread-count"
+                                title="읽지 않은 사람"
+                                aria-label={`읽지 않은 사람 ${unreadN}명`}
+                                onClick={() => openUnreadPopover(m)}
+                              >
+                                {unreadN > 99 ? "99+" : unreadN}
+                              </button>
+                              {unreadPopoverMsgId === m.id && (
+                                <div className="msg-unread-popover" role="dialog" aria-label="읽지 않은 사람">
+                                  <div className="msg-unread-popover-title">읽지 않은 사람</div>
+                                  {unreadLoading ? (
+                                    <div className="muted small">불러오는 중…</div>
+                                  ) : unreadUsers.length === 0 ? (
+                                    <div className="muted small">모두 읽었습니다</div>
+                                  ) : (
+                                    <ul className="msg-unread-list">
+                                      {unreadUsers.map((u) => (
+                                        <li key={u.id}>
+                                          <span className="msg-unread-name">{u.name}</span>
+                                          <span className="msg-unread-emp muted small">{u.employee_id}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          <div className="bubble">{m.content}</div>
+                        </div>
                       </div>
-                      <div className="bubble">{m.content}</div>
-                    </div>
-                  ))}
+                    );
+                  })}
                   <div ref={bottomRef} />
                 </div>
                 <div className="composer">

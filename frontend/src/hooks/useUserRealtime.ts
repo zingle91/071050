@@ -10,6 +10,8 @@ export type RealtimePayload = {
   data?: unknown;
   room_id?: number;
   unread_delta?: number;
+  user_id?: number;
+  last_read_at?: string | null;
 };
 
 /**

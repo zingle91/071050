@@ -35,6 +35,7 @@ export interface RoomMember {
   id: number;
   employee_id: number;
   employee: Employee;
+  last_read_at?: string | null;
 }
 
 export interface Room {
@@ -55,6 +56,15 @@ export interface Message {
   content: string;
   created_at: string;
   sender?: Employee | null;
+  /** Non-bot members (excluding sender) who have not read yet */
+  unread_count?: number;
+}
+
+export interface UnreadUser {
+  id: number;
+  employee_id: string;
+  name: string;
+  is_bot?: boolean;
 }
 
 export interface Note {
@@ -80,4 +90,17 @@ export function formatUnread(count: number | undefined | null): string {
   if (n <= 0) return "";
   if (n > 99) return "99+";
   return String(n);
+}
+
+/** Recompute per-message unread from member last_read_at snapshots. */
+export function computeMessageUnreadCount(
+  msg: Message,
+  members: RoomMember[]
+): number {
+  return members.filter((m) => {
+    if (m.employee_id === msg.sender_id) return false;
+    if (m.employee?.is_bot) return false;
+    if (m.last_read_at == null) return true;
+    return new Date(m.last_read_at).getTime() < new Date(msg.created_at).getTime();
+  }).length;
 }
