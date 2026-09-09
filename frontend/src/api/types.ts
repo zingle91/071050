@@ -80,12 +80,18 @@ export interface Note {
   id: number;
   sender_id: number;
   recipient_id: number;
+  /** Title (제목) */
   subject: string;
   content: string;
   is_read: boolean;
+  read_at?: string | null;
   created_at: string;
   sender?: Employee | null;
   recipient?: Employee | null;
+}
+
+export interface NotesUnreadCount {
+  count: number;
 }
 
 /** Effective title for sidebar / header for the current user */

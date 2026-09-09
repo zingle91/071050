@@ -113,6 +113,7 @@ class Note(Base):
     subject: Mapped[str] = mapped_column(String(200), default="")
     content: Mapped[str] = mapped_column(Text, nullable=False)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     sender: Mapped[Employee] = relationship(foreign_keys=[sender_id])

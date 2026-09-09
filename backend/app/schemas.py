@@ -133,9 +133,13 @@ class UnreadUserOut(BaseModel):
 
 
 class NoteCreate(BaseModel):
-    recipient_id: int
+    """Send a note. Prefer recipient_ids for multi-send; recipient_id kept for compat."""
+    recipient_id: int | None = None
+    recipient_ids: list[int] = []
     subject: str = ""
-    content: str
+    title: str | None = None  # alias for subject (제목)
+    content: str = ""
+    body: str | None = None  # alias for content
 
 
 class NoteOut(BaseModel):
@@ -145,12 +149,17 @@ class NoteOut(BaseModel):
     subject: str
     content: str
     is_read: bool
+    read_at: datetime | None = None
     created_at: datetime
     sender: EmployeeOut | None = None
     recipient: EmployeeOut | None = None
 
     class Config:
         from_attributes = True
+
+
+class NotesUnreadCount(BaseModel):
+    count: int
 
 
 class InviteBotRequest(BaseModel):

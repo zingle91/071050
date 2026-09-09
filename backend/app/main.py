@@ -107,6 +107,32 @@ def ensure_schema():
             if not row:
                 conn.execute(text(ddl))
 
+        # notes.read_at (when recipient opened / marked read)
+        row = conn.execute(
+            text(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'notes' AND column_name = 'read_at'
+                """
+            )
+        ).first()
+        if not row:
+            conn.execute(text("ALTER TABLE notes ADD COLUMN read_at TIMESTAMP"))
+
+        # notes.subject already present as title; ensure column exists on old DBs
+        row = conn.execute(
+            text(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'notes' AND column_name = 'subject'
+                """
+            )
+        ).first()
+        if not row:
+            conn.execute(
+                text("ALTER TABLE notes ADD COLUMN subject VARCHAR(200) DEFAULT ''")
+            )
+
         # Do NOT COALESCE NULL -> now: NULL means never accessed and must count as unread.
         # One-time repair of join-stamp false reads (old create/invite set last_read_at=now).
         conn.execute(

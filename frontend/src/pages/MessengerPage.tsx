@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { Message, Note, OrgTreeEmployee, OrgTreeNode, Room, UnreadUser } from "../api/types";
+import type { Message, Note, NotesUnreadCount, OrgTreeEmployee, OrgTreeNode, Room, UnreadUser } from "../api/types";
 import { computeMessageUnreadCount, formatUnread, isLeftRoom, roomTitle } from "../api/types";
 import { useAuth } from "../auth";
 import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
@@ -18,6 +18,14 @@ function roomActivityTs(r: Room): number {
 
 function sortRoomsByRecent(rooms: Room[]): Room[] {
   return [...rooms].sort((a, b) => roomActivityTs(b) - roomActivityTs(a));
+}
+
+
+/** ~2-line body preview for note list cards */
+function noteBodyPreview(content: string, maxLen = 120): string {
+  const flat = (content || "").replace(/\s+/g, " ").trim();
+  if (flat.length <= maxLen) return flat;
+  return flat.slice(0, maxLen).trimEnd() + "…";
 }
 
 /** Move a room to the top and optionally patch fields (live sidebar reorder). */
@@ -48,6 +56,11 @@ export default function MessengerPage() {
   const [noteSubject, setNoteSubject] = useState("");
   const [noteBody, setNoteBody] = useState("");
   const [noteRecipients, setNoteRecipients] = useState<PickedUser[]>([]);
+  const [notesSubTab, setNotesSubTab] = useState<"inbox" | "sent">("inbox");
+  const [notesUnread, setNotesUnread] = useState(0);
+  const [noteComposeOpen, setNoteComposeOpen] = useState(false);
+  const [noteDetail, setNoteDetail] = useState<Note | null>(null);
+  const [noteSending, setNoteSending] = useState(false);
   const [groupName, setGroupName] = useState("");
   const [groupMembers, setGroupMembers] = useState<PickedUser[]>([]);
   const [status, setStatus] = useState("");
@@ -94,12 +107,23 @@ export default function MessengerPage() {
   }, []);
 
   const refreshNotes = useCallback(async () => {
-    const [a, b] = await Promise.all([
+    const [a, b, u] = await Promise.all([
       api<Note[]>("/api/notes/inbox"),
       api<Note[]>("/api/notes/sent"),
+      api<NotesUnreadCount>("/api/notes/unread-count"),
     ]);
     setInbox(a);
     setSentNotes(b);
+    setNotesUnread(u.count || 0);
+  }, []);
+
+  const refreshNotesUnread = useCallback(async () => {
+    try {
+      const u = await api<NotesUnreadCount>("/api/notes/unread-count");
+      setNotesUnread(u.count || 0);
+    } catch (e) {
+      console.error(e);
+    }
   }, []);
 
   const markRoomRead = useCallback(async (roomId: number) => {
@@ -121,6 +145,25 @@ export default function MessengerPage() {
   const onRealtime = useCallback(
     (payload: RealtimePayload) => {
       if (!user) return;
+
+      if (payload.type === "note") {
+        const count = typeof payload.unread_count === "number" ? payload.unread_count : null;
+        if (count != null) setNotesUnread(count);
+        const note = payload.data as Note | undefined;
+        if (payload.action === "received" && note) {
+          setInbox((prev) => (prev.some((n) => n.id === note.id) ? prev : [note, ...prev]));
+        }
+        if (payload.action === "read" && note) {
+          setInbox((prev) => prev.map((n) => (n.id === note.id ? { ...n, ...note } : n)));
+          setNoteDetail((cur) => (cur && cur.id === note.id ? { ...cur, ...note } : cur));
+        }
+        if (count == null) {
+          queueMicrotask(() => {
+            refreshNotesUnread().catch(console.error);
+          });
+        }
+        return;
+      }
 
       if (payload.type === "membership_change") {
         const roomId = payload.room_id;
@@ -274,10 +317,26 @@ export default function MessengerPage() {
         });
       });
     },
-    [user, markRoomRead, refreshRooms]
+    [user, markRoomRead, refreshRooms, refreshNotesUnread]
   );
 
   useUserRealtime(!!user, onRealtime);
+
+  // Refresh notes list + badge when opening 쪽지 tab / window
+  useEffect(() => {
+    if (tab !== "notes") return;
+    refreshNotes().catch(console.error);
+  }, [tab, refreshNotes]);
+
+  useEffect(() => {
+    const onFocus = () => {
+      refreshNotesUnread().catch(console.error);
+      if (tab === "notes") refreshNotes().catch(console.error);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [tab, refreshNotes, refreshNotesUnread]);
+
 
   useEffect(() => {
     if (!activeRoomId) return;
@@ -467,31 +526,53 @@ export default function MessengerPage() {
       openEmployeePicker("note");
       return;
     }
+    if (!noteSubject.trim()) {
+      setStatus("쪽지 제목을 입력하세요");
+      return;
+    }
     if (!noteBody.trim()) {
       setStatus("쪽지 내용을 입력하세요");
       return;
     }
     const recipients = [...noteRecipients];
-    for (const r of recipients) {
-      await api<Note>("/api/notes", {
+    setNoteSending(true);
+    try {
+      await api<Note[]>("/api/notes", {
         method: "POST",
         body: JSON.stringify({
-          recipient_id: r.id,
-          subject: noteSubject,
-          content: noteBody,
+          recipient_ids: recipients.map((r) => r.id),
+          subject: noteSubject.trim(),
+          content: noteBody.trim(),
         }),
       });
+      setNoteSubject("");
+      setNoteBody("");
+      setNoteRecipients([]);
+      setNoteComposeOpen(false);
+      await refreshNotes();
+      setNotesSubTab("sent");
+      setStatus(`쪽지를 ${recipients.length}명에게 보냈습니다`);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "쪽지 전송 실패");
+    } finally {
+      setNoteSending(false);
     }
-    setNoteSubject("");
-    setNoteBody("");
-    setNoteRecipients([]);
-    await refreshNotes();
-    setStatus(`쪽지를 ${recipients.length}명에게 보냈습니다`);
   }
 
-  async function markRead(id: number) {
-    await api<Note>(`/api/notes/${id}/read`, { method: "POST" });
-    await refreshNotes();
+  async function openNoteDetail(n: Note) {
+    try {
+      const detail = await api<Note>(`/api/notes/${n.id}`);
+      setNoteDetail(detail);
+      if (!n.is_read && detail.is_read) {
+        setInbox((prev) => prev.map((x) => (x.id === detail.id ? { ...x, ...detail } : x)));
+        setNotesUnread((c) => Math.max(0, c - 1));
+      } else {
+        setInbox((prev) => prev.map((x) => (x.id === detail.id ? { ...x, ...detail } : x)));
+      }
+      await refreshNotesUnread();
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "쪽지를 열 수 없습니다");
+    }
   }
 
   function openRenameDialog() {
@@ -674,7 +755,14 @@ export default function MessengerPage() {
         </div>
         <nav className="tabs">
           <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>채팅</button>
-          <button className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}>쪽지</button>
+          <button className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}>
+            <span className="tab-label">
+              쪽지
+              {formatUnread(notesUnread) && (
+                <span className="unread-badge tab-unread-badge">{formatUnread(notesUnread)}</span>
+              )}
+            </span>
+          </button>
           <button className={tab === "org" ? "active" : ""} onClick={() => setTab("org")}>조직도</button>
         </nav>
         {tab === "chat" && (
@@ -912,44 +1000,83 @@ export default function MessengerPage() {
 
         {tab === "notes" && (
           <div className="notes-layout">
-            <section>
-              <h2>쪽지 보내기</h2>
-              <button type="button" className="secondary" onClick={() => openEmployeePicker("note")}>
-                직원 선택
-                {noteRecipients.length ? ` · ${noteRecipients.length}명` : ""}
+            <div className="notes-subtabs">
+              <button
+                type="button"
+                className={notesSubTab === "inbox" ? "active" : ""}
+                onClick={() => setNotesSubTab("inbox")}
+              >
+                받은 쪽지
+                {formatUnread(notesUnread) && (
+                  <span className="unread-badge tab-unread-badge">{formatUnread(notesUnread)}</span>
+                )}
               </button>
-              {noteRecipients.length > 0 && (
-                <div className="picked-chips">
-                  {noteRecipients.map((m) => (
-                    <span key={m.id} className="chip">{m.name}</span>
-                  ))}
-                </div>
+              <button
+                type="button"
+                className={notesSubTab === "sent" ? "active" : ""}
+                onClick={() => setNotesSubTab("sent")}
+              >
+                보낸 쪽지
+              </button>
+            </div>
+
+            <div className="notes-list">
+              {notesSubTab === "inbox" && (
+                inbox.length === 0 ? (
+                  <div className="muted center notes-empty">받은 쪽지가 없습니다</div>
+                ) : (
+                  inbox.map((n) => (
+                    <button
+                      type="button"
+                      key={n.id}
+                      className={n.is_read ? "note-card" : "note-card unread"}
+                      onClick={() => openNoteDetail(n)}
+                    >
+                      <div className="note-card-top">
+                        <strong className="note-card-title">{n.subject || "(제목 없음)"}</strong>
+                        {!n.is_read && <span className="note-unread-dot" aria-label="읽지 않음" />}
+                      </div>
+                      <div className="muted small">
+                        from {n.sender?.name || n.sender_id} · {new Date(n.created_at).toLocaleString()}
+                      </div>
+                      <p className="note-card-preview">{noteBodyPreview(n.content)}</p>
+                    </button>
+                  ))
+                )
               )}
-              <input placeholder="제목" value={noteSubject} onChange={(e) => setNoteSubject(e.target.value)} />
-              <textarea placeholder="내용" value={noteBody} onChange={(e) => setNoteBody(e.target.value)} rows={4} />
-              <button onClick={sendNote}>보내기</button>
-            </section>
-            <section>
-              <h2>받은 쪽지</h2>
-              {inbox.map((n) => (
-                <div key={n.id} className={n.is_read ? "note" : "note unread"}>
-                  <strong>{n.subject}</strong>
-                  <div className="muted small">from {n.sender?.name} · {new Date(n.created_at).toLocaleString()}</div>
-                  <p>{n.content}</p>
-                  {!n.is_read && <button onClick={() => markRead(n.id)}>읽음</button>}
-                </div>
-              ))}
-            </section>
-            <section>
-              <h2>보낸 쪽지</h2>
-              {sentNotes.map((n) => (
-                <div key={n.id} className="note">
-                  <strong>{n.subject}</strong>
-                  <div className="muted small">to {n.recipient?.name} · {new Date(n.created_at).toLocaleString()}</div>
-                  <p>{n.content}</p>
-                </div>
-              ))}
-            </section>
+              {notesSubTab === "sent" && (
+                sentNotes.length === 0 ? (
+                  <div className="muted center notes-empty">보낸 쪽지가 없습니다</div>
+                ) : (
+                  sentNotes.map((n) => (
+                    <button
+                      type="button"
+                      key={n.id}
+                      className="note-card"
+                      onClick={() => openNoteDetail(n)}
+                    >
+                      <div className="note-card-top">
+                        <strong className="note-card-title">{n.subject || "(제목 없음)"}</strong>
+                      </div>
+                      <div className="muted small">
+                        to {n.recipient?.name || n.recipient_id} · {new Date(n.created_at).toLocaleString()}
+                      </div>
+                      <p className="note-card-preview">{noteBodyPreview(n.content)}</p>
+                    </button>
+                  ))
+                )
+              )}
+            </div>
+
+            <div className="notes-footer">
+              <button
+                type="button"
+                className="notes-send-btn"
+                onClick={() => setNoteComposeOpen(true)}
+              >
+                쪽지 보내기
+              </button>
+            </div>
           </div>
         )}
 
@@ -1091,6 +1218,134 @@ export default function MessengerPage() {
           </div>
         </div>
       )}
+      {noteComposeOpen && (
+        <div className="modal-overlay" onClick={() => !noteSending && setNoteComposeOpen(false)}>
+          <div
+            className="note-compose-modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-labelledby="note-compose-title"
+          >
+            <div className="note-compose-header">
+              <h2 id="note-compose-title">쪽지 보내기</h2>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => !noteSending && setNoteComposeOpen(false)}
+                aria-label="닫기"
+              >
+                ✕
+              </button>
+            </div>
+            <label className="note-field">
+              수신자
+              <div className="note-recipient-row">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => openEmployeePicker("note")}
+                  disabled={noteSending}
+                >
+                  직원 선택{noteRecipients.length ? ` (${noteRecipients.length})` : ""}
+                </button>
+              </div>
+              {noteRecipients.length > 0 && (
+                <div className="picked-chips">
+                  {noteRecipients.map((m) => (
+                    <span key={m.id} className="chip chip-removable">
+                      {m.name}
+                      <button
+                        type="button"
+                        className="chip-x"
+                        aria-label={`${m.name} 제거`}
+                        onClick={() =>
+                          setNoteRecipients((prev) => prev.filter((x) => x.id !== m.id))
+                        }
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </label>
+            <label className="note-field">
+              제목
+              <input
+                autoFocus
+                placeholder="제목"
+                value={noteSubject}
+                onChange={(e) => setNoteSubject(e.target.value)}
+                maxLength={200}
+                disabled={noteSending}
+              />
+            </label>
+            <label className="note-field">
+              내용
+              <textarea
+                placeholder="내용"
+                value={noteBody}
+                onChange={(e) => setNoteBody(e.target.value)}
+                rows={8}
+                disabled={noteSending}
+              />
+            </label>
+            <div className="note-compose-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setNoteComposeOpen(false)}
+                disabled={noteSending}
+              >
+                취소
+              </button>
+              <button type="button" onClick={sendNote} disabled={noteSending}>
+                {noteSending ? "보내는 중…" : "보내기"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {noteDetail && (
+        <div className="modal-overlay" onClick={() => setNoteDetail(null)}>
+          <div
+            className="note-detail-modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-labelledby="note-detail-title"
+          >
+            <div className="note-detail-header">
+              <h2 id="note-detail-title">{noteDetail.subject || "(제목 없음)"}</h2>
+              <button type="button" className="ghost" onClick={() => setNoteDetail(null)} aria-label="닫기">
+                ✕
+              </button>
+            </div>
+            <div className="muted small note-detail-meta">
+              {noteDetail.sender_id === user?.id ? (
+                <>받는 사람: {noteDetail.recipient?.name || noteDetail.recipient_id}</>
+              ) : (
+                <>보낸 사람: {noteDetail.sender?.name || noteDetail.sender_id}</>
+              )}
+              {" · "}
+              {new Date(noteDetail.created_at).toLocaleString()}
+              {noteDetail.is_read && noteDetail.read_at
+                ? ` · 읽음 ${new Date(noteDetail.read_at).toLocaleString()}`
+                : noteDetail.recipient_id === user?.id && noteDetail.is_read
+                  ? " · 읽음"
+                  : ""}
+            </div>
+            <div className="note-detail-body">{noteDetail.content}</div>
+            <div className="note-detail-actions">
+              <button type="button" className="secondary" onClick={() => setNoteDetail(null)}>
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+
     </div>
   );
 }

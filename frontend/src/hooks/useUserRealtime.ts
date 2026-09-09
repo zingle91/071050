@@ -18,6 +18,8 @@ export type RealtimePayload = {
   room?: unknown;
   removed_rooms?: Record<string, unknown>;
   system_messages?: unknown[];
+  /** Notes unread badge sync */
+  unread_count?: number;
 };
 
 /**
