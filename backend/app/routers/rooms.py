@@ -4,13 +4,13 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import func
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models import Employee, Room, RoomMember, Message
 from app.schemas import (
     RoomCreate,
@@ -78,6 +78,37 @@ def _unread_count(db: Session, room_id: int, user_id: int, last_read_at: datetim
     if last_read_at is not None:
         q = q.filter(Message.created_at > last_read_at)
     return int(q.scalar() or 0)
+
+
+def _batch_unread_counts(
+    db: Session, user_id: int, room_ids: set[int] | list[int]
+) -> dict[int, int]:
+    """One GROUP BY room_id unread query for a user's rooms (avoids N+1 on list)."""
+    if not room_ids:
+        return {}
+    rows = (
+        db.query(Message.room_id, func.count(Message.id))
+        .join(
+            RoomMember,
+            and_(
+                RoomMember.room_id == Message.room_id,
+                RoomMember.employee_id == user_id,
+                RoomMember.status == "active",
+            ),
+        )
+        .filter(
+            Message.room_id.in_(list(room_ids)),
+            Message.sender_id != user_id,
+            Message.is_system == False,  # noqa: E712
+            or_(
+                RoomMember.last_read_at.is_(None),
+                Message.created_at > RoomMember.last_read_at,
+            ),
+        )
+        .group_by(Message.room_id)
+        .all()
+    )
+    return {int(rid): int(cnt) for rid, cnt in rows}
 
 
 def _advance_last_read(db: Session, membership: RoomMember, room_id: int) -> datetime:
@@ -185,6 +216,7 @@ def _room_out(
     user_id: int,
     db: Session,
     last_message_at: datetime | None = None,
+    unread_count: int | None = None,
 ) -> RoomOut:
     membership = next((m for m in room.members if m.employee_id == user_id), None)
     display_name = membership.display_name if membership else None
@@ -194,7 +226,10 @@ def _room_out(
     active_members = [m for m in room.members if (m.status or "active") == "active"]
     unread = 0
     if membership and status == "active":
-        unread = _unread_count(db, room.id, user_id, membership.last_read_at)
+        if unread_count is not None:
+            unread = unread_count
+        else:
+            unread = _unread_count(db, room.id, user_id, membership.last_read_at)
     if last_message_at is None:
         last_message_at = (
             db.query(func.max(Message.created_at))
@@ -403,8 +438,15 @@ def list_rooms(
         .order_by(func.coalesce(last_msg_sq.c.last_at, Room.created_at).desc())
         .all()
     )
+    unread_map = _batch_unread_counts(db, current_user.id, room_ids)
     return [
-        _room_out(room, current_user.id, db, last_message_at=last_at)
+        _room_out(
+            room,
+            current_user.id,
+            db,
+            last_message_at=last_at,
+            unread_count=unread_map.get(room.id, 0),
+        )
         for room, last_at in rows
     ]
 
@@ -634,12 +676,45 @@ def _find_recent_duplicate(
     )
 
 
+async def _generate_and_persist_bot_reply(
+    room_id: int,
+    bot_id: int,
+    user_content: str,
+    room_name: str,
+) -> None:
+    """Await LLM without a request-scoped DB session; persist with SessionLocal."""
+    from app.llm import generate_reply
+
+    try:
+        reply_text = await generate_reply(user_content, room_name)
+    except Exception:
+        return
+
+    db = SessionLocal()
+    try:
+        bot_msg = Message(room_id=room_id, sender_id=bot_id, content=reply_text)
+        db.add(bot_msg)
+        db.commit()
+        bot_msg = (
+            db.query(Message)
+            .options(joinedload(Message.sender))
+            .filter(Message.id == bot_msg.id)
+            .one()
+        )
+        await _broadcast_new_message(db, room_id, bot_msg, bot_id)
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
+
+
 @router.post("/{room_id}/messages", response_model=MessageOut)
 async def post_message(
     room_id: int,
     body: MessageCreate,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[Employee, Depends(get_current_user)],
+    background_tasks: BackgroundTasks,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
     """Create a chat message.
@@ -647,9 +722,9 @@ async def post_message(
     Stores only the request content/body string (trimmed). Never appends room
     history or other users' utterances. Supports idempotency via
     ``client_message_id`` / ``Idempotency-Key`` and a short identical-body window.
+    Bot LLM replies run in a background task with a fresh DB session so the
+    request-scoped session is not held open across the LLM await.
     """
-    from app.llm import generate_reply
-
     membership = _active_membership(db, room_id, current_user.id)
     if not membership:
         # Distinguish soft-left vs never a member
@@ -709,6 +784,9 @@ async def post_message(
     await _broadcast_new_message(db, room_id, msg, current_user.id)
     await _broadcast_read_update(db, room_id, current_user.id, membership.last_read_at)
 
+    schedule_bot_reply = False
+    bot_id: int | None = None
+    room_name = ""
     bot = db.query(Employee).filter(Employee.is_bot == True).first()  # noqa: E712
     if bot:
         bot_in_room = (
@@ -725,20 +803,24 @@ async def post_message(
         )
         if should_reply and current_user.id != bot.id:
             room = db.query(Room).filter(Room.id == room_id).first()
-            reply_text = await generate_reply(content, room.name if room else "")
-            bot_msg = Message(room_id=room_id, sender_id=bot.id, content=reply_text)
-            db.add(bot_msg)
-            db.commit()
-            bot_msg = (
-                db.query(Message)
-                .options(joinedload(Message.sender))
-                .filter(Message.id == bot_msg.id)
-                .one()
-            )
-            await _broadcast_new_message(db, room_id, bot_msg, bot.id)
+            schedule_bot_reply = True
+            bot_id = bot.id
+            room_name = room.name if room else ""
 
     members = _load_room_members(db, room_id, active_only=True)
-    return _message_out(msg, members, viewer_id=current_user.id, db=db)
+    out = _message_out(msg, members, viewer_id=current_user.id, db=db)
+
+    if schedule_bot_reply and bot_id is not None:
+        # Do not await LLM on the request session; persist reply with SessionLocal.
+        background_tasks.add_task(
+            _generate_and_persist_bot_reply,
+            room_id,
+            bot_id,
+            content,
+            room_name,
+        )
+
+    return out
 
 
 @router.post("/{room_id}/members", response_model=RoomOut)
