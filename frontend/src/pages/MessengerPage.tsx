@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import type { Message, Note, NotesUnreadCount, OrgTreeEmployee, OrgTreeNode, Room, UnreadUser } from "../api/types";
 import { computeMessageUnreadCount, formatUnread, isLeftRoom, roomTitle } from "../api/types";
 import { useAuth } from "../auth";
+import NoteComposeModal from "../components/NoteComposeModal";
 import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
 import { useUserRealtime, type RealtimePayload } from "../hooks/useUserRealtime";
 import {
@@ -13,7 +14,7 @@ import {
 
 type Tab = "chat" | "notes" | "org";
 /** Shared OrgUserPicker open modes — one component + one open flow (setPickerMode). */
-type PickerMode = "dm" | "group" | "note" | "invite" | null;
+type PickerMode = "dm" | "group" | "invite" | null;
 
 /** Sort rooms newest-activity first (API order + live WS bumps). */
 function roomActivityTs(r: Room): number {
@@ -51,13 +52,10 @@ export default function MessengerPage() {
   const [text, setText] = useState("");
   const [inbox, setInbox] = useState<Note[]>([]);
   const [sentNotes, setSentNotes] = useState<Note[]>([]);
-  const [noteSubject, setNoteSubject] = useState("");
-  const [noteBody, setNoteBody] = useState("");
-  const [noteRecipients, setNoteRecipients] = useState<PickedUser[]>([]);
   const [notesSubTab, setNotesSubTab] = useState<"inbox" | "sent">("inbox");
   const [notesUnread, setNotesUnread] = useState(0);
   const [noteComposeOpen, setNoteComposeOpen] = useState(false);
-  const [noteSending, setNoteSending] = useState(false);
+  const [noteComposeDraft, setNoteComposeDraft] = useState<NoteComposeDraft | null>(null);
   const [groupName, setGroupName] = useState("");
   const [groupMembers, setGroupMembers] = useState<PickedUser[]>([]);
   const [status, setStatus] = useState("");
@@ -532,49 +530,14 @@ export default function MessengerPage() {
     setStatus(`${users.length}명을 초대했습니다`);
   }
 
-  async function sendNote() {
-    if (!noteRecipients.length) {
-      openEmployeePicker("note");
-      return;
-    }
-    if (!noteSubject.trim()) {
-      setStatus("쪽지 제목을 입력하세요");
-      return;
-    }
-    if (!noteBody.trim()) {
-      setStatus("쪽지 내용을 입력하세요");
-      return;
-    }
-    const recipients = [...noteRecipients];
-    setNoteSending(true);
-    try {
-      await api<Note[]>("/api/notes", {
-        method: "POST",
-        body: JSON.stringify({
-          recipient_ids: recipients.map((r) => r.id),
-          subject: noteSubject.trim(),
-          content: noteBody.trim(),
-        }),
-      });
-      setNoteSubject("");
-      setNoteBody("");
-      setNoteRecipients([]);
-      setNoteComposeOpen(false);
-      await refreshNotes();
-      setNotesSubTab("sent");
-      setStatus(`쪽지를 ${recipients.length}명에게 보냈습니다`);
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "쪽지 전송 실패");
-    } finally {
-      setNoteSending(false);
-    }
+  function openNoteCompose(draft: NoteComposeDraft | null = null) {
+    setNoteComposeDraft(draft);
+    setNoteComposeOpen(true);
   }
 
   function applyNoteComposeDraft(draft: NoteComposeDraft) {
-    setNoteSubject(draft.subject || "");
-    setNoteBody(draft.body || "");
-    setNoteRecipients(draft.recipients || []);
-    setNoteComposeOpen(true);
+    // Optional fallback: drafts from popup postMessage / sessionStorage
+    openNoteCompose(draft);
     setTab("notes");
   }
 
@@ -701,8 +664,6 @@ export default function MessengerPage() {
       startChatWith(users).catch((e) => setStatus(e instanceof Error ? e.message : "실패"));
     } else if (mode === "group") {
       setGroupMembers(users);
-    } else if (mode === "note") {
-      setNoteRecipients(users);
     } else if (mode === "invite") {
       inviteMembers(users).catch((e) => setStatus(e instanceof Error ? e.message : "실패"));
     }
@@ -765,9 +726,7 @@ export default function MessengerPage() {
       ? "시작"
       : pickerMode === "invite"
         ? "초대"
-        : pickerMode === "note"
-          ? "수신자 확정"
-          : "선택 완료";
+        : "선택 완료";
 
   return (
     <div className="app-shell">
@@ -1095,7 +1054,7 @@ export default function MessengerPage() {
               <button
                 type="button"
                 className="notes-send-btn"
-                onClick={() => setNoteComposeOpen(true)}
+                onClick={() => openNoteCompose(null)}
               >
                 쪽지 보내기
               </button>
@@ -1224,94 +1183,26 @@ export default function MessengerPage() {
           </div>
         </div>
       )}
-      {noteComposeOpen && (
-        <div className="modal-overlay" onClick={() => !noteSending && setNoteComposeOpen(false)}>
-          <div
-            className="note-compose-modal"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-labelledby="note-compose-title"
-          >
-            <div className="note-compose-header">
-              <h2 id="note-compose-title">쪽지 보내기</h2>
-              <button
-                type="button"
-                className="ghost"
-                onClick={() => !noteSending && setNoteComposeOpen(false)}
-                aria-label="닫기"
-              >
-                ✕
-              </button>
-            </div>
-            <label className="note-field">
-              수신자
-              <div className="note-recipient-row">
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => openEmployeePicker("note")}
-                  disabled={noteSending}
-                >
-                  직원 선택{noteRecipients.length ? ` (${noteRecipients.length})` : ""}
-                </button>
-              </div>
-              {noteRecipients.length > 0 && (
-                <div className="picked-chips">
-                  {noteRecipients.map((m) => (
-                    <span key={m.id} className="chip chip-removable">
-                      {m.name}
-                      <button
-                        type="button"
-                        className="chip-x"
-                        aria-label={`${m.name} 제거`}
-                        onClick={() =>
-                          setNoteRecipients((prev) => prev.filter((x) => x.id !== m.id))
-                        }
-                      >
-                        ×
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
-            </label>
-            <label className="note-field">
-              제목
-              <input
-                autoFocus
-                placeholder="제목"
-                value={noteSubject}
-                onChange={(e) => setNoteSubject(e.target.value)}
-                maxLength={200}
-                disabled={noteSending}
-              />
-            </label>
-            <label className="note-field">
-              내용
-              <textarea
-                placeholder="내용"
-                value={noteBody}
-                onChange={(e) => setNoteBody(e.target.value)}
-                rows={8}
-                disabled={noteSending}
-              />
-            </label>
-            <div className="note-compose-actions">
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setNoteComposeOpen(false)}
-                disabled={noteSending}
-              >
-                취소
-              </button>
-              <button type="button" onClick={sendNote} disabled={noteSending}>
-                {noteSending ? "보내는 중…" : "보내기"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <NoteComposeModal
+        open={noteComposeOpen}
+        draft={noteComposeDraft}
+        excludeIds={user?.id ? [user.id] : []}
+        onClose={() => {
+          setNoteComposeOpen(false);
+          setNoteComposeDraft(null);
+        }}
+        onSent={(count) => {
+          setNoteComposeOpen(false);
+          setNoteComposeDraft(null);
+          refreshNotes()
+            .then(() => {
+              setNotesSubTab("sent");
+              setStatus(`쪽지를 ${count}명에게 보냈습니다`);
+            })
+            .catch(console.error);
+        }}
+        onError={setStatus}
+      />
 
       <OrgUserPicker
         open={pickerMode !== null}
@@ -1320,11 +1211,7 @@ export default function MessengerPage() {
         excludeIds={pickerExclude}
         includeBots={includeBots}
         initialSelectedIds={
-          pickerMode === "group"
-            ? groupMembers.map((m) => m.id)
-            : pickerMode === "note"
-              ? noteRecipients.map((m) => m.id)
-              : []
+          pickerMode === "group" ? groupMembers.map((m) => m.id) : []
         }
         onClose={() => setPickerMode(null)}
         onConfirm={handlePickerConfirm}

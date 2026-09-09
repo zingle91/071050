@@ -1,4 +1,4 @@
-/** Shared note compose draft helpers + postMessage protocol for popup detail. */
+/** Shared note compose draft helpers. postMessage helpers remain as optional opener fallback. */
 
 import type { Employee, Note } from "./api/types";
 import type { PickedUser } from "./components/OrgUserPicker";

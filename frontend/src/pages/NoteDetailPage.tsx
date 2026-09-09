@@ -1,23 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { api } from "../api/client";
 import type { Note } from "../api/types";
 import { useAuth } from "../auth";
+import NoteComposeModal from "../components/NoteComposeModal";
 import {
   buildForwardDraft,
   buildReplyAllDraft,
   buildReplyDraft,
-  postComposeToOpener,
   type NoteComposeDraft,
 } from "../noteCompose";
 
 export default function NoteDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { user, loading: authLoading } = useAuth();
-  const navigate = useNavigate();
   const [note, setNote] = useState<Note | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [composeDraft, setComposeDraft] = useState<NoteComposeDraft | null>(null);
+  const [status, setStatus] = useState("");
 
   useEffect(() => {
     const noteId = Number(id);
@@ -44,18 +46,17 @@ export default function NoteDetailPage() {
     };
   }, [id]);
 
-  const runCompose = useCallback(
-    (draft: NoteComposeDraft) => {
-      const sent = postComposeToOpener(draft);
-      if (sent) {
-        // Keep popup open so user can still see the note; compose opens in opener.
-        return;
-      }
-      // No opener (direct URL): stash draft and go to main messenger compose.
-      navigate("/", { replace: true });
-    },
-    [navigate]
-  );
+  const openCompose = useCallback((draft: NoteComposeDraft) => {
+    // Primary: compose inside this standalone popup (user is authenticated here).
+    setStatus("");
+    setComposeDraft(draft);
+    setComposeOpen(true);
+  }, []);
+
+  const closeCompose = useCallback(() => {
+    setComposeOpen(false);
+    setComposeDraft(null);
+  }, []);
 
   if (authLoading || loading) {
     return <div className="note-popup-page center">로딩 중...</div>;
@@ -104,30 +105,43 @@ export default function NoteDetailPage() {
           </div>
         </div>
         <div className="note-detail-body">{note.content}</div>
+        {status ? <p className="status">{status}</p> : null}
         <div className="note-detail-actions note-detail-actions-row">
           <button
             type="button"
             className="secondary"
-            onClick={() => runCompose(buildForwardDraft(note))}
+            onClick={() => openCompose(buildForwardDraft(note))}
           >
             전달하기
           </button>
           <button
             type="button"
             className="secondary"
-            onClick={() => runCompose(buildReplyDraft(note, user.id))}
+            onClick={() => openCompose(buildReplyDraft(note, user.id))}
             disabled={isMine && !(note.recipients?.length || note.recipient)}
           >
             답장하기
           </button>
           <button
             type="button"
-            onClick={() => runCompose(buildReplyAllDraft(note, user.id))}
+            onClick={() => openCompose(buildReplyAllDraft(note, user.id))}
           >
             전체 답장하기
           </button>
         </div>
       </div>
+
+      <NoteComposeModal
+        open={composeOpen}
+        draft={composeDraft}
+        excludeIds={user.id ? [user.id] : []}
+        onClose={closeCompose}
+        onSent={(count) => {
+          closeCompose();
+          setStatus(`쪽지를 ${count}명에게 보냈습니다`);
+        }}
+        onError={setStatus}
+      />
     </div>
   );
 }
