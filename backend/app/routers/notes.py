@@ -206,9 +206,13 @@ async def send_note(
         raise HTTPException(status_code=400, detail="쪽지 내용이 비어 있습니다")
     subject = _resolve_subject(body)
 
+    emp_map = {
+        e.id: e
+        for e in db.query(Employee).filter(Employee.id.in_(recipient_ids)).all()
+    }
     created_ids: list[int] = []
     for rid in recipient_ids:
-        recipient = db.query(Employee).filter(Employee.id == rid).first()
+        recipient = emp_map.get(rid)
         if not recipient or recipient.is_bot:
             raise HTTPException(status_code=404, detail="수신자를 찾을 수 없습니다")
         if rid == current_user.id:

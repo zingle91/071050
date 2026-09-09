@@ -48,11 +48,6 @@ function wsBase(): { proto: string; host: string; token: string } {
   return { proto, host, token };
 }
 
-export function wsUrl(roomId: number): string {
-  const { proto, host, token } = wsBase();
-  return `${proto}://${host}/ws/rooms/${roomId}?token=${encodeURIComponent(token)}`;
-}
-
 export function userWsUrl(): string {
   const { proto, host, token } = wsBase();
   return `${proto}://${host}/ws/user?token=${encodeURIComponent(token)}`;

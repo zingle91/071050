@@ -1,6 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
-import type { Employee, OrgTreeEmployee, OrgTreeNode } from "../api/types";
+import type { Employee, OrgTreeNode } from "../api/types";
+import OrgTreeView from "./OrgTreeView";
+import {
+  collectDescendantIds,
+  flattenTree,
+  type FlatEmp,
+} from "./orgTreeUtils";
 
 export type PickedUser = {
   id: number;
@@ -24,65 +30,6 @@ type Props = {
   onClose: () => void;
   onConfirm: (users: PickedUser[]) => void;
 };
-
-type FlatEmp = OrgTreeEmployee & { departmentName: string };
-
-function flattenTree(node: OrgTreeNode, deptName = ""): FlatEmp[] {
-  const here = node.node_type === "department" ? node.name : deptName;
-  const list: FlatEmp[] = node.employees.map((e) => ({
-    ...e,
-    departmentName: here || node.name,
-  }));
-  for (const child of node.children || []) {
-    list.push(...flattenTree(child, here || node.name));
-  }
-  return list;
-}
-
-/** Collect selectable employee ids under a node (direct + descendants). */
-function collectDescendantIds(
-  node: OrgTreeNode,
-  includeBots: boolean,
-  exclude: Set<number>
-): number[] {
-  const ids: number[] = [];
-  for (const e of node.employees || []) {
-    if (!includeBots && e.is_bot) continue;
-    if (exclude.has(e.id)) continue;
-    ids.push(e.id);
-  }
-  for (const child of node.children || []) {
-    ids.push(...collectDescendantIds(child, includeBots, exclude));
-  }
-  return ids;
-}
-
-function NodeCheckbox({
-  checked,
-  indeterminate,
-  disabled,
-  onChange,
-}: {
-  checked: boolean;
-  indeterminate: boolean;
-  disabled?: boolean;
-  onChange: () => void;
-}) {
-  const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (ref.current) ref.current.indeterminate = indeterminate && !checked;
-  }, [indeterminate, checked]);
-  return (
-    <input
-      ref={ref}
-      type="checkbox"
-      checked={checked}
-      disabled={disabled}
-      onChange={onChange}
-      onClick={(ev) => ev.stopPropagation()}
-    />
-  );
-}
 
 export default function OrgUserPicker({
   open,
@@ -288,12 +235,18 @@ export default function OrgUserPicker({
     .map((id) => empById.get(id))
     .filter(Boolean) as FlatEmp[];
 
-  function renderEmpRow(
-    e: FlatEmp | (OrgTreeEmployee & { departmentName?: string }),
+  function renderEmpRowSearch(
+    e: FlatEmp | (Employee & { departmentName?: string }),
     showDept = false
   ) {
     const disabled = exclude.has(e.id);
     const fav = favSet.has(e.id);
+    const deptName =
+      "departmentName" in e && e.departmentName
+        ? e.departmentName
+        : "department" in e && e.department
+          ? e.department?.name || ""
+          : "";
     return (
       <div
         key={e.id}
@@ -310,8 +263,8 @@ export default function OrgUserPicker({
             {e.name}
             {e.is_bot ? " 🤖" : ""}
             <span className="muted small"> ({e.employee_id})</span>
-            {showDept && "departmentName" in e && e.departmentName ? (
-              <span className="muted small"> · {e.departmentName}</span>
+            {showDept && deptName ? (
+              <span className="muted small"> · {deptName}</span>
             ) : null}
           </span>
         </label>
@@ -323,49 +276,6 @@ export default function OrgUserPicker({
         >
           {fav ? "★" : "☆"}
         </button>
-      </div>
-    );
-  }
-
-  function renderDept(node: OrgTreeNode, depth: number) {
-    const key = node.node_type === "group" ? "root" : `dept-${node.id}`;
-    const isOpen = expanded.has(key);
-    const emps = (node.employees || []).filter((e) => includeBots || !e.is_bot);
-    const check = nodeCheckState(node);
-    return (
-      <div key={key} className="org-tree-node" style={{ marginLeft: depth ? 12 : 0 }}>
-        <div className="org-tree-header">
-          <label className="org-tree-node-check" title="하위 직원 전체 선택/해제">
-            <NodeCheckbox
-              checked={check.checked}
-              indeterminate={check.indeterminate}
-              disabled={check.disabled}
-              onChange={() => toggleNodeSelect(node)}
-            />
-          </label>
-          <button type="button" className="org-tree-toggle" onClick={() => toggleExpand(key)}>
-            <span className="caret">{isOpen ? "▼" : "▶"}</span>
-            <strong>{node.name}</strong>
-            <span className="muted small">
-              {" "}
-              (
-              {collectDescendantIds(node, includeBots, exclude).length}
-              )
-            </span>
-          </button>
-        </div>
-        {isOpen && (
-          <div className="org-tree-children org-tree-vertical">
-            {/* Child organizations first (parent above children), then this unit's employees */}
-            {(node.children || []).map((c) => renderDept(c, depth + 1))}
-            {emps
-              .filter((e) => !exclude.has(e.id) || selected.has(e.id))
-              .map((e) => renderEmpRow({ ...e, departmentName: node.name }))}
-            {emps
-              .filter((e) => exclude.has(e.id) && !selected.has(e.id))
-              .map((e) => renderEmpRow({ ...e, departmentName: node.name }))}
-          </div>
-        )}
       </div>
     );
   }
@@ -447,13 +357,37 @@ export default function OrgUserPicker({
               {filtered.length === 0 ? (
                 <div className="muted">일치하는 결과가 없습니다</div>
               ) : (
-                filtered.map((e) => renderEmpRow(e, true))
+                filtered.map((e) => renderEmpRowSearch(e, true))
               )}
             </div>
           )}
 
           {!loading && !filtered && tab === "org" && tree && (
-            <div className="org-tree-vertical">{renderDept(tree, 0)}</div>
+            <OrgTreeView
+              root={tree}
+              expanded={expanded}
+              onToggleExpand={toggleExpand}
+              includeBots={includeBots}
+              mode="select"
+              selected={selected}
+              exclude={exclude}
+              onToggleEmployee={toggleSelect}
+              onToggleNode={toggleNodeSelect}
+              nodeCheckState={nodeCheckState}
+              renderEmployeeActions={(e) => {
+                const fav = favSet.has(e.id);
+                return (
+                  <button
+                    type="button"
+                    className={`star-btn ${fav ? "on" : ""}`}
+                    title={fav ? "즐겨찾기 해제" : "즐겨찾기 추가"}
+                    onClick={() => toggleFavorite(e.id, fav)}
+                  >
+                    {fav ? "★" : "☆"}
+                  </button>
+                );
+              }}
+            />
           )}
 
           {!loading && !filtered && tab === "fav" && (
@@ -466,7 +400,7 @@ export default function OrgUserPicker({
                 </div>
               ) : (
                 favList.map((e) =>
-                  renderEmpRow(
+                  renderEmpRowSearch(
                     {
                       id: e.id,
                       employee_id: e.employee_id,

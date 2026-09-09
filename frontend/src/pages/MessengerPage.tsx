@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { Message, Note, NotesUnreadCount, OrgTreeEmployee, OrgTreeNode, Room, UnreadUser } from "../api/types";
+import type { Message, Note, NotesUnreadCount, OrgTreeNode, Room, UnreadUser } from "../api/types";
 import { computeMessageUnreadCount, formatUnread, isLeftRoom, roomTitle } from "../api/types";
 import { useAuth } from "../auth";
 import NoteComposeModal from "../components/NoteComposeModal";
+import OrgBrowsePane from "../components/OrgBrowsePane";
 import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
 import { useUserRealtime, type RealtimePayload } from "../hooks/useUserRealtime";
 import {
@@ -753,38 +754,6 @@ export default function MessengerPage() {
     });
   }
 
-  function renderOrgBrowseNode(node: OrgTreeNode, depth: number) {
-    const key = node.node_type === "group" ? "root" : `dept-${node.id}`;
-    const isOpen = orgExpanded.has(key);
-    const emps = (node.employees || []).filter((e) => !e.is_bot);
-    const childCount =
-      (node.children || []).length + emps.length;
-    return (
-      <div key={key} className="org-tree-node" style={{ marginLeft: depth ? 12 : 0 }}>
-        <div className="org-tree-header">
-          <button type="button" className="org-tree-toggle" onClick={() => toggleOrgExpand(key)}>
-            <span className="caret">{isOpen ? "▼" : "▶"}</span>
-            <strong>{node.name}</strong>
-            <span className="muted small"> ({childCount})</span>
-          </button>
-        </div>
-        {isOpen && (
-          <div className="org-tree-children org-tree-vertical">
-            {(node.children || []).map((c) => renderOrgBrowseNode(c, depth + 1))}
-            {emps.map((e: OrgTreeEmployee) => (
-              <div key={e.id} className="org-picker-row org-browse-emp">
-                <span className="org-picker-name">
-                  {e.name}
-                  <span className="muted small"> ({e.employee_id})</span>
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  }
-
   const confirmLabel =
     pickerMode === "dm"
       ? "시작"
@@ -1140,26 +1109,12 @@ export default function MessengerPage() {
         )}
 
         {tab === "org" && (
-          <div className="org-layout">
-            <div className="org-layout-head">
-              <h2>조직도</h2>
-              <button type="button" className="secondary" onClick={() => openEmployeePicker("dm")}>
-                직원 선택
-              </button>
-            </div>
-            <p className="muted small org-layout-hint">
-              조직을 클릭하면 하위 조직·소속 직원이 펼쳐집니다. 기본은 접힌 상태입니다.
-            </p>
-            <div className="org-tree-vertical org-browse-tree">
-              {orgTree ? (
-                renderOrgBrowseNode(orgTree, 0)
-              ) : (
-                <div className="muted center" style={{ padding: "2rem" }}>
-                  조직도를 불러오는 중…
-                </div>
-              )}
-            </div>
-          </div>
+          <OrgBrowsePane
+            orgTree={orgTree}
+            expanded={orgExpanded}
+            onToggleExpand={toggleOrgExpand}
+            onOpenPicker={() => openEmployeePicker("dm")}
+          />
         )}
       </main>
 

@@ -171,17 +171,30 @@ def _message_unread_count(members: list[RoomMember], msg: Message) -> int:
     return len(_iter_unreader_members(members, msg))
 
 
-def _emp_name(db: Session, emp_id: int | None) -> str:
+def _employees_by_ids(db: Session, ids: set[int] | list[int]) -> dict[int, Employee]:
+    """Single IN query → id→Employee map (create_room / invite / notes)."""
+    id_list = list({i for i in ids if i is not None})
+    if not id_list:
+        return {}
+    rows = db.query(Employee).filter(Employee.id.in_(id_list)).all()
+    return {e.id: e for e in rows}
+
+
+def _emp_names_map(db: Session, ids: set[int] | list[int]) -> dict[int, str]:
+    """Preload id→name for system-message rendering (no per-call DB)."""
+    return {eid: emp.name for eid, emp in _employees_by_ids(db, ids).items()}
+
+
+def _name_from_map(names: dict[int, str], emp_id: int | None) -> str:
     if not emp_id:
         return "누군가"
-    emp = db.query(Employee).filter(Employee.id == emp_id).first()
-    return emp.name if emp else "누군가"
+    return names.get(emp_id, "누군가")
 
 
-def _render_system_content(msg: Message, viewer_id: int, db: Session) -> str:
-    """Personalize system notification text for the viewing user."""
-    actor_name = _emp_name(db, msg.system_actor_id)
-    target_name = _emp_name(db, msg.system_target_id)
+def _render_system_content(msg: Message, viewer_id: int, names: dict[int, str]) -> str:
+    """Personalize system notification text for the viewing user (map only)."""
+    actor_name = _name_from_map(names, msg.system_actor_id)
+    target_name = _name_from_map(names, msg.system_target_id)
     event = msg.system_event or ""
     if event == "leave":
         if msg.system_actor_id == viewer_id:
@@ -194,11 +207,32 @@ def _render_system_content(msg: Message, viewer_id: int, db: Session) -> str:
     return msg.content
 
 
-def _message_out(msg: Message, members: list[RoomMember], viewer_id: int | None = None, db: Session | None = None) -> MessageOut:
+def _system_name_ids(*msgs: Message) -> set[int]:
+    ids: set[int] = set()
+    for msg in msgs:
+        if not msg or not msg.is_system:
+            continue
+        if msg.system_actor_id:
+            ids.add(msg.system_actor_id)
+        if msg.system_target_id:
+            ids.add(msg.system_target_id)
+    return ids
+
+
+def _message_out(
+    msg: Message,
+    members: list[RoomMember],
+    viewer_id: int | None = None,
+    db: Session | None = None,
+    name_map: dict[int, str] | None = None,
+) -> MessageOut:
     base = MessageOut.model_validate(msg)
     content = msg.content
-    if msg.is_system and viewer_id is not None and db is not None:
-        content = _render_system_content(msg, viewer_id, db)
+    if msg.is_system and viewer_id is not None:
+        names = name_map
+        if names is None and db is not None:
+            names = _emp_names_map(db, _system_name_ids(msg))
+        content = _render_system_content(msg, viewer_id, names or {})
     return base.model_copy(
         update={
             "content": content,
@@ -304,7 +338,6 @@ async def _broadcast_read_update(
         "user_id": user_id,
         "last_read_at": last_read_at.isoformat() if last_read_at else None,
     }
-    await manager.broadcast(room_id, event)
     member_ids = [
         m.employee_id
         for m in db.query(RoomMember)
@@ -338,7 +371,6 @@ async def _broadcast_membership_change(
         "removed_rooms": removed_room_payloads or {},
         "system_messages": system_messages or [],
     }
-    await manager.broadcast(room_id, event)
     targets = list({*notify_user_ids, *removed_ids})
     if targets:
         await manager.notify_users(targets, event)
@@ -354,41 +386,46 @@ async def _broadcast_system_messages(
     from app.ws_manager import manager
 
     active_members = _load_room_members(db, room_id, active_only=True)
+    name_map = _emp_names_map(db, _system_name_ids(*msgs))
+    deliveries: list[tuple[int, dict]] = []
     for uid in notify_user_ids:
         for msg in msgs:
-            payload = _message_out(msg, active_members, viewer_id=uid, db=db).model_dump(mode="json")
-            event = {
-                "type": "message",
-                "room_id": room_id,
-                "unread_delta": 0,
-                "data": payload,
-            }
-            await manager.notify_users([uid], event)
+            payload = _message_out(
+                msg, active_members, viewer_id=uid, name_map=name_map
+            ).model_dump(mode="json")
+            deliveries.append(
+                (
+                    uid,
+                    {
+                        "type": "message",
+                        "room_id": room_id,
+                        "unread_delta": 0,
+                        "data": payload,
+                    },
+                )
+            )
+    await manager.notify_personalized(deliveries)
 
 
 async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender_id: int):
-    """Fan-out to active members only (left/kicked users do not get new chat traffic)."""
+    """Fan-out via /ws/user only (active members; left/kicked get no new chat traffic)."""
     from app.ws_manager import manager
 
     members = _load_room_members(db, room_id, active_only=True)
-    # Use sender as viewer for public content; clients with system meta can re-render if needed
-    payload = _message_out(msg, members, viewer_id=sender_id, db=db).model_dump(mode="json")
-    # Room broadcast keeps a generic delta; user channel personalizes (0 for sender/system).
-    event = {
-        "type": "message",
-        "room_id": room_id,
-        "unread_delta": 0 if msg.is_system else 1,
-        "data": payload,
-    }
-    await manager.broadcast(room_id, event)
-
     member_ids = [m.employee_id for m in members]
-    if member_ids:
-        if msg.is_system:
-            for uid in member_ids:
-                personalized = _message_out(msg, members, viewer_id=uid, db=db).model_dump(mode="json")
-                await manager.notify_users(
-                    [uid],
+    if not member_ids:
+        return
+
+    name_map = _emp_names_map(db, _system_name_ids(msg)) if msg.is_system else {}
+    deliveries: list[tuple[int, dict]] = []
+    if msg.is_system:
+        for uid in member_ids:
+            personalized = _message_out(
+                msg, members, viewer_id=uid, name_map=name_map
+            ).model_dump(mode="json")
+            deliveries.append(
+                (
+                    uid,
                     {
                         "type": "message",
                         "room_id": room_id,
@@ -396,11 +433,16 @@ async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender
                         "data": personalized,
                     },
                 )
-        else:
-            # Per-user delta: sender must not bump own sidebar unread_count
-            for uid in member_ids:
-                await manager.notify_users(
-                    [uid],
+            )
+    else:
+        # Shared payload; per-user unread_delta (0 for sender)
+        payload = _message_out(
+            msg, members, viewer_id=sender_id, name_map=name_map
+        ).model_dump(mode="json")
+        for uid in member_ids:
+            deliveries.append(
+                (
+                    uid,
                     {
                         "type": "message",
                         "room_id": room_id,
@@ -408,6 +450,8 @@ async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender
                         "data": payload,
                     },
                 )
+            )
+    await manager.notify_personalized(deliveries)
 
 
 @router.get("", response_model=list[RoomOut])
@@ -484,12 +528,14 @@ def create_room(
                         m.removed_by_id = None
                 db.commit()
                 return _room_out(_load_room(db, room.id), current_user.id, db)
-        other = db.query(Employee).filter(Employee.id == other_id).first()
+        emps = _employees_by_ids(db, member_ids)
+        other = emps.get(other_id)
         name = f"{current_user.name} ↔ {other.name if other else other_id}"
     else:
         # Group display names are NOT unique. Identity is Room.public_id (UUID).
         # Duplicate names are allowed; clients/joins that need a stable id must use public_id.
         name = body.name or "그룹 채팅"
+        emps = _employees_by_ids(db, member_ids)
 
     room = Room(
         name=name,
@@ -500,7 +546,7 @@ def create_room(
     db.add(room)
     db.flush()
     for mid in member_ids:
-        if not db.query(Employee).filter(Employee.id == mid).first():
+        if mid not in emps:
             raise HTTPException(status_code=400, detail=f"존재하지 않는 직원 id: {mid}")
         db.add(
             RoomMember(
@@ -569,7 +615,11 @@ def list_messages(
         .limit(500)
         .all()
     )
-    return [_message_out(m, members, viewer_id=current_user.id, db=db) for m in msgs]
+    name_map = _emp_names_map(db, _system_name_ids(*msgs))
+    return [
+        _message_out(m, members, viewer_id=current_user.id, name_map=name_map)
+        for m in msgs
+    ]
 
 
 @router.get(
@@ -844,8 +894,14 @@ def invite_members(
         m.employee_id: m
         for m in db.query(RoomMember).filter(RoomMember.room_id == room_id).all()
     }
+    emp_map = {
+        e.id: e
+        for e in db.query(Employee)
+        .filter(Employee.id.in_(list(body.member_ids)), Employee.is_active == True)  # noqa: E712
+        .all()
+    }
     for mid in body.member_ids:
-        emp = db.query(Employee).filter(Employee.id == mid, Employee.is_active == True).first()  # noqa: E712
+        emp = emp_map.get(mid)
         if not emp:
             raise HTTPException(status_code=400, detail=f"존재하지 않는 직원 id: {mid}")
         prev = existing.get(mid)
@@ -906,8 +962,11 @@ async def leave_room(
         room_payload = _room_out(room, remaining_active[0].employee_id, db).model_dump(mode="json")
 
     active_members = _load_room_members(db, room_id, active_only=True)
+    leave_names = _emp_names_map(db, _system_name_ids(sys_msg))
     sys_payloads = [
-        _message_out(sys_msg, active_members, viewer_id=uid, db=db).model_dump(mode="json")
+        _message_out(sys_msg, active_members, viewer_id=uid, name_map=leave_names).model_dump(
+            mode="json"
+        )
         for uid in notify_ids
     ]
 
