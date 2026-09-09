@@ -41,9 +41,19 @@ export async function api<T>(
   return res.json();
 }
 
-export function wsUrl(roomId: number): string {
-  const token = getToken();
+function wsBase(): { proto: string; host: string; token: string } {
+  const token = getToken() || "";
   const proto = window.location.protocol === "https:" ? "wss" : "ws";
   const host = window.location.host;
-  return `${proto}://${host}/ws/rooms/${roomId}?token=${encodeURIComponent(token || "")}`;
+  return { proto, host, token };
+}
+
+export function wsUrl(roomId: number): string {
+  const { proto, host, token } = wsBase();
+  return `${proto}://${host}/ws/rooms/${roomId}?token=${encodeURIComponent(token)}`;
+}
+
+export function userWsUrl(): string {
+  const { proto, host, token } = wsBase();
+  return `${proto}://${host}/ws/user?token=${encodeURIComponent(token)}`;
 }

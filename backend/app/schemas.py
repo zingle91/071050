@@ -75,9 +75,18 @@ class RoomOut(BaseModel):
     room_type: str
     created_at: datetime
     members: list[RoomMemberOut] = []
+    # Per-user personal alias; None means fall back to name
+    display_name: str | None = None
+    unread_count: int = 0
 
     class Config:
         from_attributes = True
+
+
+class RoomDisplayNameUpdate(BaseModel):
+    display_name: str | None = Field(
+        None, description="나만 보이는 채팅방 이름. null/빈 문자열이면 기본 제목으로 복원"
+    )
 
 
 class RoomInviteRequest(BaseModel):

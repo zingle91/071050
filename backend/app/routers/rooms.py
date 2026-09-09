@@ -1,11 +1,23 @@
+from datetime import datetime
 from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException, status
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Employee, Room, RoomMember, Message
-from app.schemas import RoomCreate, RoomOut, MessageCreate, MessageOut, InviteBotRequest, RoomInviteRequest
+from app.schemas import (
+    RoomCreate,
+    RoomOut,
+    RoomMemberOut,
+    MessageCreate,
+    MessageOut,
+    InviteBotRequest,
+    RoomInviteRequest,
+    RoomDisplayNameUpdate,
+)
 
 router = APIRouter(prefix="/api/rooms", tags=["rooms"])
 
@@ -13,6 +25,69 @@ router = APIRouter(prefix="/api/rooms", tags=["rooms"])
 def _user_room_ids(db: Session, user_id: int) -> set[int]:
     rows = db.query(RoomMember.room_id).filter(RoomMember.employee_id == user_id).all()
     return {r[0] for r in rows}
+
+
+def _membership(db: Session, room_id: int, user_id: int) -> RoomMember | None:
+    return (
+        db.query(RoomMember)
+        .filter(RoomMember.room_id == room_id, RoomMember.employee_id == user_id)
+        .first()
+    )
+
+
+def _unread_count(db: Session, room_id: int, user_id: int, last_read_at: datetime | None) -> int:
+    q = db.query(func.count(Message.id)).filter(
+        Message.room_id == room_id,
+        Message.sender_id != user_id,
+    )
+    if last_read_at is not None:
+        q = q.filter(Message.created_at > last_read_at)
+    return int(q.scalar() or 0)
+
+
+def _room_out(room: Room, user_id: int, db: Session) -> RoomOut:
+    membership = next((m for m in room.members if m.employee_id == user_id), None)
+    display_name = membership.display_name if membership else None
+    last_read = membership.last_read_at if membership else None
+    unread = _unread_count(db, room.id, user_id, last_read) if membership else 0
+    return RoomOut(
+        id=room.id,
+        name=room.name,
+        room_type=room.room_type,
+        created_at=room.created_at,
+        members=[RoomMemberOut.model_validate(m) for m in room.members],
+        display_name=display_name,
+        unread_count=unread,
+    )
+
+
+def _load_room(db: Session, room_id: int) -> Room:
+    return (
+        db.query(Room)
+        .options(
+            joinedload(Room.members).joinedload(RoomMember.employee).joinedload(Employee.department)
+        )
+        .filter(Room.id == room_id)
+        .one()
+    )
+
+
+async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender_id: int):
+    from app.ws_manager import manager
+
+    payload = MessageOut.model_validate(msg).model_dump(mode="json")
+    await manager.broadcast(room_id, {"type": "message", "data": payload})
+
+    member_ids = [
+        m.employee_id
+        for m in db.query(RoomMember).filter(RoomMember.room_id == room_id).all()
+        if m.employee_id != sender_id
+    ]
+    if member_ids:
+        await manager.notify_users(
+            member_ids,
+            {"type": "message", "data": payload},
+        )
 
 
 @router.get("", response_model=list[RoomOut])
@@ -30,7 +105,7 @@ def list_rooms(
         .order_by(Room.created_at.desc())
         .all()
     )
-    return rooms
+    return [_room_out(r, current_user.id, db) for r in rooms]
 
 
 @router.post("", response_model=RoomOut)
@@ -48,7 +123,6 @@ def create_room(
     if body.room_type == "direct":
         if len(member_ids) != 2:
             raise HTTPException(status_code=400, detail="1:1 채팅은 상대 1명만 지정하세요")
-        # Reuse existing direct room if present
         other_id = next(i for i in member_ids if i != current_user.id)
         existing = (
             db.query(Room)
@@ -59,12 +133,7 @@ def create_room(
         for room in existing:
             ids = {m.employee_id for m in room.members}
             if ids == member_ids:
-                return (
-                    db.query(Room)
-                    .options(joinedload(Room.members).joinedload(RoomMember.employee))
-                    .filter(Room.id == room.id)
-                    .one()
-                )
+                return _room_out(_load_room(db, room.id), current_user.id, db)
         other = db.query(Employee).filter(Employee.id == other_id).first()
         name = f"{current_user.name} ↔ {other.name if other else other_id}"
     else:
@@ -73,17 +142,46 @@ def create_room(
     room = Room(name=name, room_type=body.room_type, created_by=current_user.id)
     db.add(room)
     db.flush()
+    now = datetime.utcnow()
     for mid in member_ids:
         if not db.query(Employee).filter(Employee.id == mid).first():
             raise HTTPException(status_code=400, detail=f"존재하지 않는 직원 id: {mid}")
-        db.add(RoomMember(room_id=room.id, employee_id=mid))
+        db.add(RoomMember(room_id=room.id, employee_id=mid, last_read_at=now))
     db.commit()
-    return (
-        db.query(Room)
-        .options(joinedload(Room.members).joinedload(RoomMember.employee))
-        .filter(Room.id == room.id)
-        .one()
-    )
+    return _room_out(_load_room(db, room.id), current_user.id, db)
+
+
+@router.patch("/{room_id}/display-name", response_model=RoomOut)
+def update_display_name(
+    room_id: int,
+    body: RoomDisplayNameUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[Employee, Depends(get_current_user)],
+):
+    membership = _membership(db, room_id, current_user.id)
+    if not membership:
+        raise HTTPException(status_code=403, detail="해당 채팅방 권한이 없습니다")
+    raw = body.display_name
+    if raw is None or not str(raw).strip():
+        membership.display_name = None
+    else:
+        membership.display_name = str(raw).strip()[:200]
+    db.commit()
+    return _room_out(_load_room(db, room_id), current_user.id, db)
+
+
+@router.post("/{room_id}/read", response_model=RoomOut)
+def mark_room_read(
+    room_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[Employee, Depends(get_current_user)],
+):
+    membership = _membership(db, room_id, current_user.id)
+    if not membership:
+        raise HTTPException(status_code=403, detail="해당 채팅방 권한이 없습니다")
+    membership.last_read_at = datetime.utcnow()
+    db.commit()
+    return _room_out(_load_room(db, room_id), current_user.id, db)
 
 
 @router.get("/{room_id}/messages", response_model=list[MessageOut])
@@ -111,16 +209,18 @@ async def post_message(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[Employee, Depends(get_current_user)],
 ):
-    from app.ws_manager import manager
     from app.llm import generate_reply
 
-    if room_id not in _user_room_ids(db, current_user.id):
+    membership = _membership(db, room_id, current_user.id)
+    if not membership:
         raise HTTPException(status_code=403, detail="해당 채팅방 권한이 없습니다")
     if not body.content.strip():
         raise HTTPException(status_code=400, detail="메시지 내용이 비어 있습니다")
 
     msg = Message(room_id=room_id, sender_id=current_user.id, content=body.content.strip())
     db.add(msg)
+    # Sender has seen up through this message
+    membership.last_read_at = datetime.utcnow()
     db.commit()
     db.refresh(msg)
     msg = (
@@ -129,10 +229,8 @@ async def post_message(
         .filter(Message.id == msg.id)
         .one()
     )
-    payload = MessageOut.model_validate(msg).model_dump(mode="json")
-    await manager.broadcast(room_id, {"type": "message", "data": payload})
+    await _broadcast_new_message(db, room_id, msg, current_user.id)
 
-    # AI bot auto-reply if bot is in room and message mentions bot or starts with @AI
     bot = db.query(Employee).filter(Employee.is_bot == True).first()  # noqa: E712
     if bot:
         bot_in_room = (
@@ -156,12 +254,9 @@ async def post_message(
                 .filter(Message.id == bot_msg.id)
                 .one()
             )
-            bot_payload = MessageOut.model_validate(bot_msg).model_dump(mode="json")
-            await manager.broadcast(room_id, {"type": "message", "data": bot_payload})
+            await _broadcast_new_message(db, room_id, bot_msg, bot.id)
 
     return msg
-
-
 
 
 @router.post("/{room_id}/members", response_model=RoomOut)
@@ -185,20 +280,16 @@ def invite_members(
         m.employee_id
         for m in db.query(RoomMember).filter(RoomMember.room_id == room_id).all()
     }
+    now = datetime.utcnow()
     for mid in body.member_ids:
         if mid in existing_ids:
             continue
         emp = db.query(Employee).filter(Employee.id == mid, Employee.is_active == True).first()  # noqa: E712
         if not emp:
             raise HTTPException(status_code=400, detail=f"존재하지 않는 직원 id: {mid}")
-        db.add(RoomMember(room_id=room_id, employee_id=mid))
+        db.add(RoomMember(room_id=room_id, employee_id=mid, last_read_at=now))
     db.commit()
-    return (
-        db.query(Room)
-        .options(joinedload(Room.members).joinedload(RoomMember.employee))
-        .filter(Room.id == room_id)
-        .one()
-    )
+    return _room_out(_load_room(db, room_id), current_user.id, db)
 
 
 @router.post("/invite-bot", response_model=RoomOut)
@@ -218,11 +309,6 @@ def invite_bot(
         .first()
     )
     if not existing:
-        db.add(RoomMember(room_id=body.room_id, employee_id=bot.id))
+        db.add(RoomMember(room_id=body.room_id, employee_id=bot.id, last_read_at=datetime.utcnow()))
         db.commit()
-    return (
-        db.query(Room)
-        .options(joinedload(Room.members).joinedload(RoomMember.employee))
-        .filter(Room.id == body.room_id)
-        .one()
-    )
+    return _room_out(_load_room(db, body.room_id), current_user.id, db)

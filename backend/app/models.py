@@ -25,7 +25,7 @@ class Employee(Base):
     __tablename__ = "employees"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    employee_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)  # ??
+    employee_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     department_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), nullable=True)
@@ -38,7 +38,7 @@ class Employee(Base):
 
 
 class FavoriteEmployee(Base):
-    """Per-user favorited employees for the org picker ???? tab."""
+    """Per-user favorited employees for the org picker favorites tab."""
     __tablename__ = "favorite_employees"
     __table_args__ = (UniqueConstraint("owner_id", "employee_id"),)
 
@@ -71,6 +71,10 @@ class RoomMember(Base):
     room_id: Mapped[int] = mapped_column(ForeignKey("rooms.id"), nullable=False)
     employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
     joined_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Per-user personal room alias (None = use Room.name)
+    display_name: Mapped[str | None] = mapped_column(String(200), nullable=True, default=None)
+    # Messages after this timestamp count as unread for this member
+    last_read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
     room: Mapped[Room] = relationship(back_populates="members")
     employee: Mapped[Employee] = relationship(back_populates="room_memberships")

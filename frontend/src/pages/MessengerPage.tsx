@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, wsUrl } from "../api/client";
+import { api, userWsUrl, wsUrl } from "../api/client";
 import type { Employee, Message, Note, Room } from "../api/types";
+import { formatUnread, roomTitle } from "../api/types";
 import { useAuth } from "../auth";
 import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
 
@@ -25,8 +26,16 @@ export default function MessengerPage() {
   const [groupMembers, setGroupMembers] = useState<PickedUser[]>([]);
   const [status, setStatus] = useState("");
   const [pickerMode, setPickerMode] = useState<PickerMode>(null);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const userWsRef = useRef<WebSocket | null>(null);
+  const activeRoomIdRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    activeRoomIdRef.current = activeRoomId;
+  }, [activeRoomId]);
 
   /** Single shared entry to open OrgUserPicker for every flow. */
   const openEmployeePicker = useCallback((mode: Exclude<PickerMode, null>) => {
@@ -57,17 +66,70 @@ export default function MessengerPage() {
     setSentNotes(b);
   }, []);
 
+  const markRoomRead = useCallback(async (roomId: number) => {
+    try {
+      const updated = await api<Room>(`/api/rooms/${roomId}/read`, { method: "POST" });
+      setRooms((prev) => prev.map((r) => (r.id === updated.id ? { ...r, ...updated, unread_count: 0 } : r)));
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
   useEffect(() => {
     refreshRooms().catch(console.error);
     refreshEmployees().catch(console.error);
     refreshNotes().catch(console.error);
   }, [refreshRooms, refreshEmployees, refreshNotes]);
 
+  // Personal WebSocket: bump unread for rooms that are not currently open
+  useEffect(() => {
+    if (!user) return;
+    userWsRef.current?.close();
+    const ws = new WebSocket(userWsUrl());
+    userWsRef.current = ws;
+    ws.onmessage = (ev) => {
+      try {
+        const payload = JSON.parse(ev.data);
+        if (payload.type !== "message" || !payload.data) return;
+        const msg = payload.data as Message;
+        const viewing = activeRoomIdRef.current;
+        if (viewing === msg.room_id) {
+          // Active room: treat as read; keep badge at 0 and advance last-read
+          setRooms((prev) =>
+            prev.map((r) => (r.id === msg.room_id ? { ...r, unread_count: 0 } : r))
+          );
+          markRoomRead(msg.room_id).catch(console.error);
+          return;
+        }
+        if (msg.sender_id === user.id) return;
+        setRooms((prev) =>
+          prev.map((r) =>
+            r.id === msg.room_id
+              ? { ...r, unread_count: (r.unread_count || 0) + 1 }
+              : r
+          )
+        );
+      } catch {
+        /* ignore */
+      }
+    };
+    ws.onopen = () => {
+      const ping = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+      }, 25000);
+      ws.addEventListener("close", () => clearInterval(ping));
+    };
+    return () => ws.close();
+  }, [user, markRoomRead]);
+
   useEffect(() => {
     if (!activeRoomId) return;
     api<Message[]>(`/api/rooms/${activeRoomId}/messages`)
       .then(setMessages)
       .catch(console.error);
+
+    // Clear unread when opening a room
+    markRoomRead(activeRoomId).catch(console.error);
 
     wsRef.current?.close();
     const ws = new WebSocket(wsUrl(activeRoomId));
@@ -80,13 +142,17 @@ export default function MessengerPage() {
             if (prev.some((m) => m.id === payload.data.id)) return prev;
             return [...prev, payload.data];
           });
+          // Still viewing this room → keep read
+          setRooms((prev) =>
+            prev.map((r) => (r.id === activeRoomId ? { ...r, unread_count: 0 } : r))
+          );
         }
       } catch {
         /* ignore */
       }
     };
     return () => ws.close();
-  }, [activeRoomId]);
+  }, [activeRoomId, markRoomRead]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -225,6 +291,28 @@ export default function MessengerPage() {
     await refreshNotes();
   }
 
+  function openRenameDialog() {
+    if (!activeRoom) return;
+    setRenameValue(activeRoom.display_name || "");
+    setRenameOpen(true);
+  }
+
+  async function saveDisplayName(clear = false) {
+    if (!activeRoomId) return;
+    try {
+      const body = clear ? { display_name: null } : { display_name: renameValue.trim() || null };
+      const room = await api<Room>(`/api/rooms/${activeRoomId}/display-name`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      setRooms((prev) => prev.map((r) => (r.id === room.id ? { ...r, ...room } : r)));
+      setRenameOpen(false);
+      setStatus(clear || !renameValue.trim() ? "기본 채팅방 이름으로 복원했습니다" : "채팅방 이름을 저장했습니다");
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : "이름 저장 실패");
+    }
+  }
+
   function handlePickerConfirm(users: PickedUser[]) {
     const mode = pickerMode;
     setPickerMode(null);
@@ -275,16 +363,22 @@ export default function MessengerPage() {
         </nav>
         {tab === "chat" && (
           <div className="room-list">
-            {rooms.map((r) => (
-              <button
-                key={r.id}
-                className={r.id === activeRoomId ? "room active" : "room"}
-                onClick={() => setActiveRoomId(r.id)}
-              >
-                <span>{r.room_type === "direct" ? "1:1" : "그룹"}</span>
-                <strong>{r.name}</strong>
-              </button>
-            ))}
+            {rooms.map((r) => {
+              const badge = formatUnread(r.unread_count);
+              return (
+                <button
+                  key={r.id}
+                  className={r.id === activeRoomId ? "room active" : "room"}
+                  onClick={() => setActiveRoomId(r.id)}
+                >
+                  <span className="room-row-top">
+                    <span className="room-type">{r.room_type === "direct" ? "1:1" : "그룹"}</span>
+                    {badge && <span className="unread-badge">{badge}</span>}
+                  </span>
+                  <strong>{roomTitle(r)}</strong>
+                </button>
+              );
+            })}
           </div>
         )}
         <button className="logout" onClick={logout}>로그아웃</button>
@@ -338,7 +432,21 @@ export default function MessengerPage() {
             {activeRoom ? (
               <>
                 <header className="chat-header">
-                  <h2>{activeRoom.name}</h2>
+                  <div className="chat-header-title">
+                    <h2>{roomTitle(activeRoom)}</h2>
+                    <button
+                      type="button"
+                      className="icon-edit-btn"
+                      title="채팅방 이름 편집 (나만 보임)"
+                      aria-label="채팅방 이름 편집"
+                      onClick={openRenameDialog}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                      </svg>
+                    </button>
+                  </div>
                   <div className="muted small">
                     참여자: {activeRoom.members.map((m) => m.employee.name).join(", ")}
                   </div>
@@ -462,6 +570,41 @@ export default function MessengerPage() {
         onClose={() => setPickerMode(null)}
         onConfirm={handlePickerConfirm}
       />
+
+      {renameOpen && activeRoom && (
+        <div className="modal-overlay" onClick={() => setRenameOpen(false)}>
+          <div className="rename-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-labelledby="rename-title">
+            <div className="rename-modal-header">
+              <h2 id="rename-title">채팅방 이름 설정</h2>
+              <button type="button" className="ghost" onClick={() => setRenameOpen(false)} aria-label="닫기">✕</button>
+            </div>
+            <p className="muted small rename-hint">
+              이 이름은 나에게만 보입니다. 비우거나 「기본값으로」를 누르면 원래 제목(
+              {activeRoom.name})으로 돌아갑니다.
+            </p>
+            <label className="rename-label">
+              내 채팅방 이름
+              <input
+                autoFocus
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                placeholder="나만 보이는 이름"
+                maxLength={200}
+                onKeyDown={(e) => e.key === "Enter" && saveDisplayName(false)}
+              />
+            </label>
+            <div className="rename-actions">
+              <button type="button" className="secondary" onClick={() => saveDisplayName(true)}>
+                기본값으로
+              </button>
+              <div className="rename-actions-right">
+                <button type="button" className="secondary" onClick={() => setRenameOpen(false)}>취소</button>
+                <button type="button" onClick={() => saveDisplayName(false)}>저장</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

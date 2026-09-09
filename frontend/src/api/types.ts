@@ -43,6 +43,9 @@ export interface Room {
   room_type: string;
   created_at: string;
   members: RoomMember[];
+  /** Per-user personal alias; null/undefined → use name */
+  display_name?: string | null;
+  unread_count?: number;
 }
 
 export interface Message {
@@ -64,4 +67,17 @@ export interface Note {
   created_at: string;
   sender?: Employee | null;
   recipient?: Employee | null;
+}
+
+/** Effective title for sidebar / header for the current user */
+export function roomTitle(room: Room): string {
+  const alias = room.display_name?.trim();
+  return alias || room.name;
+}
+
+export function formatUnread(count: number | undefined | null): string {
+  const n = count || 0;
+  if (n <= 0) return "";
+  if (n > 99) return "99+";
+  return String(n);
 }

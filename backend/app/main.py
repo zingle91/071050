@@ -43,6 +43,41 @@ def ensure_schema():
                 )
             )
 
+        # room_members.display_name (per-user room alias)
+        row = conn.execute(
+            text(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'room_members' AND column_name = 'display_name'
+                """
+            )
+        ).first()
+        if not row:
+            conn.execute(
+                text("ALTER TABLE room_members ADD COLUMN display_name VARCHAR(200)")
+            )
+
+        # room_members.last_read_at (unread baseline)
+        row = conn.execute(
+            text(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'room_members' AND column_name = 'last_read_at'
+                """
+            )
+        ).first()
+        if not row:
+            conn.execute(
+                text("ALTER TABLE room_members ADD COLUMN last_read_at TIMESTAMP")
+            )
+
+        # Backfill last_read_at so existing history is not all unread
+        conn.execute(
+            text(
+                "UPDATE room_members SET last_read_at = COALESCE(last_read_at, CURRENT_TIMESTAMP)"
+            )
+        )
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):

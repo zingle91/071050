@@ -35,3 +35,24 @@ async def room_ws(websocket: WebSocket, room_id: int, token: str = Query(...)):
             await websocket.receive_text()
     except WebSocketDisconnect:
         await manager.disconnect(room_id, websocket)
+
+
+@router.websocket("/ws/user")
+async def user_ws(websocket: WebSocket, token: str = Query(...)):
+    """Personal channel: live message events for all rooms (unread badges)."""
+    db: Session = SessionLocal()
+    try:
+        user = get_user_from_token(token, db)
+        if not user:
+            await websocket.close(code=4401)
+            return
+        user_id = user.id
+    finally:
+        db.close()
+
+    await manager.connect_user(user_id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await manager.disconnect_user(user_id, websocket)
