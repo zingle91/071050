@@ -21,13 +21,6 @@ function sortRoomsByRecent(rooms: Room[]): Room[] {
 }
 
 
-/** ~2-line body preview for note list cards */
-function noteBodyPreview(content: string, maxLen = 120): string {
-  const flat = (content || "").replace(/\s+/g, " ").trim();
-  if (flat.length <= maxLen) return flat;
-  return flat.slice(0, maxLen).trimEnd() + "…";
-}
-
 /** Move a room to the top and optionally patch fields (live sidebar reorder). */
 function bumpRoomToTop(prev: Room[], roomId: number, patch: Partial<Room> = {}): Room[] {
   const idx = prev.findIndex((r) => r.id === roomId);
@@ -1039,7 +1032,6 @@ export default function MessengerPage() {
                       <div className="muted small">
                         보낸 사람: {n.sender?.name || n.sender_id} · {new Date(n.created_at).toLocaleString()}
                       </div>
-                      <p className="note-card-preview">{noteBodyPreview(n.content)}</p>
                     </button>
                   ))
                 )
@@ -1061,7 +1053,6 @@ export default function MessengerPage() {
                       <div className="muted small">
                         받는 사람: {n.recipient?.name || n.recipient_id} · {new Date(n.created_at).toLocaleString()}
                       </div>
-                      <p className="note-card-preview">{noteBodyPreview(n.content)}</p>
                     </button>
                   ))
                 )
@@ -1103,23 +1094,6 @@ export default function MessengerPage() {
           </div>
         )}
       </main>
-
-      <OrgUserPicker
-        open={pickerMode !== null}
-        title="직원 선택"
-        confirmLabel={confirmLabel}
-        excludeIds={pickerExclude}
-        includeBots={includeBots}
-        initialSelectedIds={
-          pickerMode === "group"
-            ? groupMembers.map((m) => m.id)
-            : pickerMode === "note"
-              ? noteRecipients.map((m) => m.id)
-              : []
-        }
-        onClose={() => setPickerMode(null)}
-        onConfirm={handlePickerConfirm}
-      />
 
       {renameOpen && activeRoom && (
         <div className="modal-overlay" onClick={() => setRenameOpen(false)}>
@@ -1306,6 +1280,23 @@ export default function MessengerPage() {
           </div>
         </div>
       )}
+
+      <OrgUserPicker
+        open={pickerMode !== null}
+        title="직원 선택"
+        confirmLabel={confirmLabel}
+        excludeIds={pickerExclude}
+        includeBots={includeBots}
+        initialSelectedIds={
+          pickerMode === "group"
+            ? groupMembers.map((m) => m.id)
+            : pickerMode === "note"
+              ? noteRecipients.map((m) => m.id)
+              : []
+        }
+        onClose={() => setPickerMode(null)}
+        onConfirm={handlePickerConfirm}
+      />
 
       {noteDetail && (
         <div className="modal-overlay" onClick={() => setNoteDetail(null)}>

@@ -376,7 +376,7 @@ export default function OrgUserPicker({
   });
 
   return (
-    <div className="modal-overlay" onClick={onClose} role="presentation">
+    <div className="modal-overlay org-picker-overlay" onClick={onClose} role="presentation">
       <div
         className="org-picker-modal"
         onClick={(ev) => ev.stopPropagation()}
