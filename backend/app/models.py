@@ -1,0 +1,86 @@
+from datetime import datetime
+from sqlalchemy import (
+    String, Boolean, DateTime, ForeignKey, Text, Integer, UniqueConstraint
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.database import Base
+
+
+class Department(Base):
+    __tablename__ = "departments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+
+    employees: Mapped[list["Employee"]] = relationship(back_populates="department")
+
+
+class Employee(Base):
+    __tablename__ = "employees"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    employee_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)  # 사번
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    department_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), nullable=True)
+    is_bot: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    department: Mapped[Department | None] = relationship(back_populates="employees")
+    room_memberships: Mapped[list["RoomMember"]] = relationship(back_populates="employee")
+
+
+class Room(Base):
+    __tablename__ = "rooms"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    room_type: Mapped[str] = mapped_column(String(20), nullable=False)  # direct | group
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    members: Mapped[list["RoomMember"]] = relationship(back_populates="room", cascade="all, delete-orphan")
+    messages: Mapped[list["Message"]] = relationship(back_populates="room", cascade="all, delete-orphan")
+
+
+class RoomMember(Base):
+    __tablename__ = "room_members"
+    __table_args__ = (UniqueConstraint("room_id", "employee_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    room_id: Mapped[int] = mapped_column(ForeignKey("rooms.id"), nullable=False)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
+    joined_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    room: Mapped[Room] = relationship(back_populates="members")
+    employee: Mapped[Employee] = relationship(back_populates="room_memberships")
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    room_id: Mapped[int] = mapped_column(ForeignKey("rooms.id"), nullable=False)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    room: Mapped[Room] = relationship(back_populates="messages")
+    sender: Mapped[Employee] = relationship()
+
+
+class Note(Base):
+    __tablename__ = "notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
+    recipient_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
+    subject: Mapped[str] = mapped_column(String(200), default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    is_read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    sender: Mapped[Employee] = relationship(foreign_keys=[sender_id])
+    recipient: Mapped[Employee] = relationship(foreign_keys=[recipient_id])

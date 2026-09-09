@@ -1,0 +1,52 @@
+:root { font-family: "Segoe UI", "Malgun Gothic", sans-serif; color: #0f172a; background: #e2e8f0; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input, select, textarea { font: inherit; }
+button { cursor: pointer; border: none; background: #2563eb; color: white; border-radius: 8px; padding: 0.55rem 0.9rem; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+input, select, textarea { width: 100%; padding: 0.55rem 0.7rem; border: 1px solid #cbd5e1; border-radius: 8px; background: white; }
+.muted { color: #64748b; }
+.small { font-size: 0.85rem; }
+.center { display: grid; place-items: center; height: 100%; padding: 2rem; }
+.error { color: #b91c1c; background: #fee2e2; padding: 0.5rem 0.75rem; border-radius: 8px; }
+.login-page { min-height: 100vh; display: grid; place-items: center; background: linear-gradient(135deg, #1e3a8a, #0ea5e9); }
+.login-card { width: min(420px, 92vw); background: white; border-radius: 16px; padding: 2rem; display: grid; gap: 0.85rem; box-shadow: 0 20px 50px rgba(0,0,0,.2); }
+.login-card h1 { margin: 0; }
+.login-card label { display: grid; gap: 0.35rem; font-weight: 600; }
+.hint { font-size: 0.85rem; color: #64748b; }
+.app-shell { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
+.sidebar { background: #0f172a; color: white; display: flex; flex-direction: column; padding: 1rem; gap: 1rem; }
+.brand strong { font-size: 1.15rem; }
+.tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.35rem; }
+.tabs button { background: #1e293b; }
+.tabs button.active { background: #3b82f6; }
+.room-list { display: grid; gap: 0.4rem; overflow: auto; flex: 1; }
+.room { text-align: left; background: #1e293b; display: grid; gap: 0.15rem; }
+.room span { font-size: 0.75rem; opacity: 0.8; }
+.room.active { outline: 2px solid #60a5fa; }
+.logout { background: #334155; margin-top: auto; }
+.main { display: flex; flex-direction: column; min-height: 100vh; background: #f8fafc; }
+.banner { background: #dbeafe; color: #1e3a8a; padding: 0.6rem 1rem; cursor: pointer; }
+.chat-layout, .notes-layout, .org-layout { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.chat-toolbar { padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; display: grid; gap: 0.5rem; background: white; }
+.create-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.create-row > * { flex: 1; min-width: 140px; }
+.create-row button { flex: 0 0 auto; }
+.chat-header { padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; background: white; }
+.chat-header h2 { margin: 0 0 0.25rem; font-size: 1.1rem; }
+.messages { flex: 1; overflow: auto; padding: 1rem; display: flex; flex-direction: column; gap: 0.65rem; }
+.msg { max-width: 70%; }
+.msg.mine { align-self: flex-end; }
+.msg .meta { font-size: 0.75rem; color: #64748b; margin-bottom: 0.2rem; }
+.msg .bubble { background: white; border: 1px solid #e2e8f0; padding: 0.65rem 0.8rem; border-radius: 12px; white-space: pre-wrap; }
+.msg.mine .bubble { background: #2563eb; color: white; border-color: #2563eb; }
+.composer { display: flex; gap: 0.5rem; padding: 0.75rem 1rem; border-top: 1px solid #e2e8f0; background: white; }
+.notes-layout { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; padding: 1rem; }
+.notes-layout section, .org-layout { background: white; border-radius: 12px; padding: 1rem; border: 1px solid #e2e8f0; }
+.notes-layout section { display: grid; gap: 0.5rem; align-content: start; }
+.note { border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.75rem; }
+.note.unread { border-color: #3b82f6; background: #eff6ff; }
+.org-layout { margin: 1rem; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 0.55rem; border-bottom: 1px solid #e2e8f0; }
+@media (max-width: 860px) { .app-shell { grid-template-columns: 1fr; } .sidebar { min-height: auto; } }
