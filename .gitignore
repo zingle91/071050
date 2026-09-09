@@ -15,3 +15,15 @@ _scaffold*.py
 uvicorn*.log
 vite*.log
 
+
+# QA / local scratch (do not commit)
+.qa-*
+debate_*
+f00001_token.txt
+f00001_session.json
+*_token.txt
+openapi_dump.json
+extract_report.py
+scripts/_qa_*
+scripts/_korean_*
+scripts/_test-korean-*
