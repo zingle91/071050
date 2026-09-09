@@ -73,21 +73,28 @@ def _load_room(db: Session, room_id: int) -> Room:
 
 
 async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender_id: int):
+    """Fan-out to room sockets (legacy) and every member's /ws/user channel.
+
+    User channel is the primary realtime path: active room appends the message;
+    inactive rooms bump unread. Sender is included so multi-tab stays in sync.
+    """
     from app.ws_manager import manager
 
     payload = MessageOut.model_validate(msg).model_dump(mode="json")
-    await manager.broadcast(room_id, {"type": "message", "data": payload})
+    event = {
+        "type": "message",
+        "room_id": room_id,
+        "unread_delta": 1,
+        "data": payload,
+    }
+    await manager.broadcast(room_id, event)
 
     member_ids = [
         m.employee_id
         for m in db.query(RoomMember).filter(RoomMember.room_id == room_id).all()
-        if m.employee_id != sender_id
     ]
     if member_ids:
-        await manager.notify_users(
-            member_ids,
-            {"type": "message", "data": payload},
-        )
+        await manager.notify_users(member_ids, event)
 
 
 @router.get("", response_model=list[RoomOut])

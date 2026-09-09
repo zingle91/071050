@@ -6,8 +6,9 @@ from fastapi import WebSocket
 
 class ConnectionManager:
     def __init__(self):
+        # Legacy per-room sockets (optional; primary path is user channel)
         self.room_connections: dict[int, set[WebSocket]] = defaultdict(set)
-        # user_id -> websockets (personal channel for unread / cross-room events)
+        # user_id -> websockets (personal channel: messages + unread)
         self.user_connections: dict[int, set[WebSocket]] = defaultdict(set)
         self.lock = asyncio.Lock()
 

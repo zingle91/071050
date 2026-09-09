@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, userWsUrl, wsUrl } from "../api/client";
+import { api } from "../api/client";
 import type { Employee, Message, Note, Room } from "../api/types";
 import { formatUnread, roomTitle } from "../api/types";
 import { useAuth } from "../auth";
 import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
+import { useUserRealtime, type RealtimePayload } from "../hooks/useUserRealtime";
 
 type Tab = "chat" | "notes" | "org";
 /** Shared OrgUserPicker open modes — one component + one open flow (setPickerMode). */
@@ -29,8 +30,6 @@ export default function MessengerPage() {
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const userWsRef = useRef<WebSocket | null>(null);
   const activeRoomIdRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -81,46 +80,42 @@ export default function MessengerPage() {
     refreshNotes().catch(console.error);
   }, [refreshRooms, refreshEmployees, refreshNotes]);
 
-  // Personal WebSocket: bump unread for rooms that are not currently open
-  useEffect(() => {
-    if (!user) return;
-    userWsRef.current?.close();
-    const ws = new WebSocket(userWsUrl());
-    userWsRef.current = ws;
-    ws.onmessage = (ev) => {
-      try {
-        const payload = JSON.parse(ev.data);
-        if (payload.type !== "message" || !payload.data) return;
-        const msg = payload.data as Message;
-        const viewing = activeRoomIdRef.current;
-        if (viewing === msg.room_id) {
-          // Active room: treat as read; keep badge at 0 and advance last-read
-          setRooms((prev) =>
-            prev.map((r) => (r.id === msg.room_id ? { ...r, unread_count: 0 } : r))
-          );
-          markRoomRead(msg.room_id).catch(console.error);
-          return;
-        }
-        if (msg.sender_id === user.id) return;
+  // Single user-level WebSocket: center append + sidebar unread (no polling, no per-room socket)
+  const onRealtime = useCallback(
+    (payload: RealtimePayload) => {
+      if (payload.type !== "message" || !payload.data || !user) return;
+      const msg = payload.data as Message;
+      const roomId = msg.room_id ?? payload.room_id;
+      if (roomId == null) return;
+      const viewing = activeRoomIdRef.current;
+      const delta = typeof payload.unread_delta === "number" ? payload.unread_delta : 1;
+
+      if (viewing === roomId) {
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          return [...prev, msg];
+        });
         setRooms((prev) =>
-          prev.map((r) =>
-            r.id === msg.room_id
-              ? { ...r, unread_count: (r.unread_count || 0) + 1 }
-              : r
-          )
+          prev.map((r) => (r.id === roomId ? { ...r, unread_count: 0 } : r))
         );
-      } catch {
-        /* ignore */
+        markRoomRead(roomId).catch(console.error);
+        return;
       }
-    };
-    ws.onopen = () => {
-      const ping = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) ws.send("ping");
-      }, 25000);
-      ws.addEventListener("close", () => clearInterval(ping));
-    };
-    return () => ws.close();
-  }, [user, markRoomRead]);
+
+      // Inactive room: bump unread for others' messages only
+      if (msg.sender_id === user.id) return;
+      setRooms((prev) =>
+        prev.map((r) =>
+          r.id === roomId
+            ? { ...r, unread_count: (r.unread_count || 0) + delta }
+            : r
+        )
+      );
+    },
+    [user, markRoomRead]
+  );
+
+  useUserRealtime(!!user, onRealtime);
 
   useEffect(() => {
     if (!activeRoomId) return;
@@ -130,28 +125,6 @@ export default function MessengerPage() {
 
     // Clear unread when opening a room
     markRoomRead(activeRoomId).catch(console.error);
-
-    wsRef.current?.close();
-    const ws = new WebSocket(wsUrl(activeRoomId));
-    wsRef.current = ws;
-    ws.onmessage = (ev) => {
-      try {
-        const payload = JSON.parse(ev.data);
-        if (payload.type === "message") {
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === payload.data.id)) return prev;
-            return [...prev, payload.data];
-          });
-          // Still viewing this room → keep read
-          setRooms((prev) =>
-            prev.map((r) => (r.id === activeRoomId ? { ...r, unread_count: 0 } : r))
-          );
-        }
-      } catch {
-        /* ignore */
-      }
-    };
-    return () => ws.close();
   }, [activeRoomId, markRoomRead]);
 
   useEffect(() => {

@@ -9,12 +9,35 @@ from app.ws_manager import manager
 router = APIRouter(tags=["websocket"])
 
 
+async def _ws_keepalive(websocket: WebSocket):
+    """Receive client pings; reply pong to JSON ping; ignore plain text ping."""
+    while True:
+        raw = await websocket.receive_text()
+        text = (raw or "").strip()
+        if text.lower() == "ping":
+            try:
+                await websocket.send_text('{"type":"pong"}')
+            except Exception:
+                return
+            continue
+        if text.startswith("{"):
+            try:
+                import json
+
+                msg = json.loads(text)
+                if msg.get("type") == "ping":
+                    await websocket.send_text('{"type":"pong"}')
+            except Exception:
+                pass
+
+
 @router.websocket("/ws/rooms/{room_id}")
 async def room_ws(websocket: WebSocket, room_id: int, token: str = Query(...)):
+    """Optional room channel (legacy). Prefer /ws/user for all realtime."""
     db: Session = SessionLocal()
     try:
         user = get_user_from_token(token, db)
-        if not user:
+        if not user or not user.is_active:
             await websocket.close(code=4401)
             return
         membership = (
@@ -30,20 +53,20 @@ async def room_ws(websocket: WebSocket, room_id: int, token: str = Query(...)):
 
     await manager.connect(room_id, websocket)
     try:
-        while True:
-            # Keepalive / client can send ping
-            await websocket.receive_text()
+        await _ws_keepalive(websocket)
     except WebSocketDisconnect:
+        pass
+    finally:
         await manager.disconnect(room_id, websocket)
 
 
 @router.websocket("/ws/user")
 async def user_ws(websocket: WebSocket, token: str = Query(...)):
-    """Personal channel: live message events for all rooms (unread badges)."""
+    """Personal channel: live message events for all rooms (center + unread badges)."""
     db: Session = SessionLocal()
     try:
         user = get_user_from_token(token, db)
-        if not user:
+        if not user or not user.is_active:
             await websocket.close(code=4401)
             return
         user_id = user.id
@@ -52,7 +75,8 @@ async def user_ws(websocket: WebSocket, token: str = Query(...)):
 
     await manager.connect_user(user_id, websocket)
     try:
-        while True:
-            await websocket.receive_text()
+        await _ws_keepalive(websocket)
     except WebSocketDisconnect:
+        pass
+    finally:
         await manager.disconnect_user(user_id, websocket)

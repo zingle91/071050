@@ -9,3 +9,9 @@ venv/
 .DS_Store
 pgdata/
 _scaffold*.py
+
+# local server logs
+*.log
+uvicorn*.log
+vite*.log
+
