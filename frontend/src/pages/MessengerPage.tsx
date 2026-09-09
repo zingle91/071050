@@ -91,7 +91,14 @@ export default function MessengerPage() {
 
   const refreshRooms = useCallback(async () => {
     const data = await api<Room[]>("/api/rooms");
-    setRooms(sortRoomsByRecent(data));
+    const viewing = activeRoomIdRef.current;
+    // While a room is open, keep sidebar badge at 0 even if a list refresh
+    // races ahead of mark-read (stale unread_count from server).
+    setRooms(
+      sortRoomsByRecent(
+        data.map((r) => (viewing != null && r.id === viewing ? { ...r, unread_count: 0 } : r))
+      )
+    );
     if (!activeRoomId && data.length) setActiveRoomId(data[0].id);
   }, [activeRoomId]);
 
@@ -123,9 +130,38 @@ export default function MessengerPage() {
   }, []);
 
   const markRoomRead = useCallback(async (roomId: number) => {
+    // Optimistic clear only while this room is still the center view.
+    if (activeRoomIdRef.current === roomId) {
+      setRooms((prev) =>
+        prev.map((r) => (r.id === roomId ? { ...r, unread_count: 0 } : r))
+      );
+    }
     try {
       const updated = await api<Room>(`/api/rooms/${roomId}/read`, { method: "POST" });
-      setRooms((prev) => prev.map((r) => (r.id === updated.id ? { ...r, ...updated, unread_count: 0 } : r)));
+      setRooms((prev) =>
+        prev.map((r) => {
+          if (r.id !== updated.id) return r;
+          // Still viewing: force badge 0 (active-room messages must not count).
+          if (activeRoomIdRef.current === updated.id) {
+            return {
+              ...r,
+              ...updated,
+              unread_count: 0,
+              display_name: updated.display_name ?? r.display_name,
+            };
+          }
+          // User left this room before POST returned: do NOT clobber newer WS bumps
+          // with the stale unread_count:0 from this mark-read response.
+          return {
+            ...r,
+            members: updated.members ?? r.members,
+            last_message_at: updated.last_message_at ?? r.last_message_at,
+            membership_status: updated.membership_status ?? r.membership_status,
+            unread_count: r.unread_count,
+            display_name: r.display_name,
+          };
+        })
+      );
     } catch (e) {
       console.error(e);
     }
@@ -246,11 +282,16 @@ export default function MessengerPage() {
         setRooms((prev) => {
           const next = prev.map((r) => {
             if (r.id !== roomId) return r;
+            const members = r.members.map((m) =>
+              m.employee_id === readerId ? { ...m, last_read_at: lastReadAt } : m
+            );
+            // Self mark-read / open: clear sidebar badge immediately via WS
+            // (HTTP response may arrive later; avoid residual unread).
+            const clearMine = readerId === user.id;
             return {
               ...r,
-              members: r.members.map((m) =>
-                m.employee_id === readerId ? { ...m, last_read_at: lastReadAt } : m
-              ),
+              members,
+              unread_count: clearMine ? 0 : r.unread_count,
             };
           });
           const room = next.find((r) => r.id === roomId);
@@ -283,9 +324,11 @@ export default function MessengerPage() {
           if (prev.some((m) => m.id === msg.id)) return prev;
           return [...prev, msg];
         });
-        // Any message (incl. system) moves room to top
+        // Active center room: never increment sidebar unread; confirm with mark-read
         setRooms((prev) => bumpRoomToTop(prev, roomId, { unread_count: 0, last_message_at: activityAt }));
-        markRoomRead(roomId).catch(console.error);
+        if (!msg.is_system && msg.sender_id !== user.id) {
+          markRoomRead(roomId).catch(console.error);
+        }
         return;
       }
 
@@ -302,6 +345,7 @@ export default function MessengerPage() {
         if (
           !msg.is_system &&
           msg.sender_id !== user.id &&
+          delta > 0 &&
           !isLeftRoom(room)
         ) {
           unread = unread + delta;
@@ -353,11 +397,15 @@ export default function MessengerPage() {
     setUnreadPopoverMsgId(null);
     setRoomMenuOpen(false);
     setKickOpen(false);
+    // Optimistic clear as soon as center room switches (before POST /read returns)
+    setRooms((prev) =>
+      prev.map((r) => (r.id === activeRoomId ? { ...r, unread_count: 0 } : r))
+    );
     api<Message[]>(`/api/rooms/${activeRoomId}/messages`)
       .then(setMessages)
       .catch(console.error);
 
-    // Clear unread when opening a room
+    // Persist mark-read + server confirm (also drives peer read_update digits)
     markRoomRead(activeRoomId).catch(console.error);
   }, [activeRoomId, markRoomRead]);
 
@@ -783,7 +831,12 @@ export default function MessengerPage() {
                   <button
                     type="button"
                     className={active ? "room active" : "room"}
-                    onClick={() => setActiveRoomId(r.id)}
+                    onClick={() => {
+                      setActiveRoomId(r.id);
+                      setRooms((prev) =>
+                        prev.map((x) => (x.id === r.id ? { ...x, unread_count: 0 } : x))
+                      );
+                    }}
                   >
                     <span className="room-row-top">
                       <span className="room-type">{r.room_type === "direct" ? "1:1" : "그룹"}</span>

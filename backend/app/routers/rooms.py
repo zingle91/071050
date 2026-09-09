@@ -80,6 +80,25 @@ def _unread_count(db: Session, room_id: int, user_id: int, last_read_at: datetim
     return int(q.scalar() or 0)
 
 
+def _advance_last_read(db: Session, membership: RoomMember, room_id: int) -> datetime:
+    """Advance last_read_at monotonically to cover all messages currently in the room.
+
+    Never rewinds (concurrent mark-read / send races). Uses max(now, latest message)
+    so a mark-read that lands just after an insert still clears that message.
+    """
+    latest = (
+        db.query(func.max(Message.created_at))
+        .filter(Message.room_id == room_id)
+        .scalar()
+    )
+    now = datetime.utcnow()
+    stamp = now if latest is None else max(now, latest)
+    prev = membership.last_read_at
+    if prev is None or stamp > prev:
+        membership.last_read_at = stamp
+    return membership.last_read_at  # type: ignore[return-value]
+
+
 def _load_room_members(db: Session, room_id: int, *, active_only: bool = True) -> list[RoomMember]:
     q = (
         db.query(RoomMember)
@@ -319,6 +338,7 @@ async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender
     members = _load_room_members(db, room_id, active_only=True)
     # Use sender as viewer for public content; clients with system meta can re-render if needed
     payload = _message_out(msg, members, viewer_id=sender_id, db=db).model_dump(mode="json")
+    # Room broadcast keeps a generic delta; user channel personalizes (0 for sender/system).
     event = {
         "type": "message",
         "room_id": room_id,
@@ -329,7 +349,6 @@ async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender
 
     member_ids = [m.employee_id for m in members]
     if member_ids:
-        # Personalize system content per user when needed
         if msg.is_system:
             for uid in member_ids:
                 personalized = _message_out(msg, members, viewer_id=uid, db=db).model_dump(mode="json")
@@ -343,7 +362,17 @@ async def _broadcast_new_message(db: Session, room_id: int, msg: Message, sender
                     },
                 )
         else:
-            await manager.notify_users(member_ids, event)
+            # Per-user delta: sender must not bump own sidebar unread_count
+            for uid in member_ids:
+                await manager.notify_users(
+                    [uid],
+                    {
+                        "type": "message",
+                        "room_id": room_id,
+                        "unread_delta": 0 if uid == sender_id else 1,
+                        "data": payload,
+                    },
+                )
 
 
 @router.get("", response_model=list[RoomOut])
@@ -471,11 +500,12 @@ async def mark_room_read(
     membership = _membership(db, room_id, current_user.id)
     if not membership:
         raise HTTPException(status_code=403, detail="해당 채팅방 권한이 없습니다")
-    # Soft-left users may view history but should not affect others' unread
-    membership.last_read_at = datetime.utcnow()
+    # Soft-left users may view history but should not affect others' unread.
+    # Monotonic advance covers concurrent inserts and overlapping mark-read calls.
+    _advance_last_read(db, membership, room_id)
     db.commit()
     db.refresh(membership)
-    if membership.status == "active":
+    if membership.status == "active" and membership.last_read_at is not None:
         await _broadcast_read_update(db, room_id, current_user.id, membership.last_read_at)
     return _room_out(_load_room(db, room_id), current_user.id, db)
 
@@ -653,7 +683,8 @@ async def post_message(
         client_message_id=client_key,
     )
     db.add(msg)
-    membership.last_read_at = datetime.utcnow()
+    db.flush()  # assign msg.created_at before advancing read cursor
+    _advance_last_read(db, membership, room_id)
     try:
         db.commit()
     except IntegrityError:
