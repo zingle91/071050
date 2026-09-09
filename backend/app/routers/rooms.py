@@ -1,4 +1,5 @@
 """Room/membership/message API with soft-leave and system notifications."""
+import uuid
 from datetime import datetime
 from typing import Annotated
 
@@ -181,6 +182,7 @@ def _room_out(
         )
     return RoomOut(
         id=room.id,
+        public_id=room.public_id,
         name=room.name,
         room_type=room.room_type,
         created_at=room.created_at,
@@ -412,9 +414,16 @@ def create_room(
         other = db.query(Employee).filter(Employee.id == other_id).first()
         name = f"{current_user.name} ↔ {other.name if other else other_id}"
     else:
+        # Group display names are NOT unique. Identity is Room.public_id (UUID).
+        # Duplicate names are allowed; clients/joins that need a stable id must use public_id.
         name = body.name or "그룹 채팅"
 
-    room = Room(name=name, room_type=body.room_type, created_by=current_user.id)
+    room = Room(
+        name=name,
+        room_type=body.room_type,
+        created_by=current_user.id,
+        public_id=str(uuid.uuid4()),
+    )
     db.add(room)
     db.flush()
     for mid in member_ids:

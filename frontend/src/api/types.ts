@@ -40,6 +40,8 @@ export interface RoomMember {
 
 export interface Room {
   id: number;
+  /** Stable UUID identity; display names may collide */
+  public_id: string;
   name: string;
   room_type: string;
   created_at: string;

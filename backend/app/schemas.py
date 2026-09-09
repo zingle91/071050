@@ -72,6 +72,7 @@ class RoomMemberOut(BaseModel):
 
 class RoomOut(BaseModel):
     id: int
+    public_id: str  # UUID; stable room identity (names may collide)
     name: str
     room_type: str
     created_at: datetime

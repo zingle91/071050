@@ -1,4 +1,5 @@
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -106,6 +107,38 @@ def ensure_schema():
             ).first()
             if not row:
                 conn.execute(text(ddl))
+
+        # rooms.public_id — stable UUID identity (display names are NOT unique / may collide)
+        row = conn.execute(
+            text(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'rooms' AND column_name = 'public_id'
+                """
+            )
+        ).first()
+        if not row:
+            conn.execute(text("ALTER TABLE rooms ADD COLUMN public_id VARCHAR(36)"))
+        # Backfill missing keys in Python so we do not depend on pgcrypto
+        missing = conn.execute(
+            text("SELECT id FROM rooms WHERE public_id IS NULL OR btrim(public_id) = ''")
+        ).fetchall()
+        for (rid,) in missing:
+            conn.execute(
+                text("UPDATE rooms SET public_id = :pid WHERE id = :id"),
+                {"pid": str(uuid.uuid4()), "id": rid},
+            )
+        conn.execute(text("ALTER TABLE rooms ALTER COLUMN public_id SET NOT NULL"))
+        idx = conn.execute(
+            text(
+                """
+                SELECT 1 FROM pg_indexes
+                WHERE tablename = 'rooms' AND indexname = 'ix_rooms_public_id'
+                """
+            )
+        ).first()
+        if not idx:
+            conn.execute(text("CREATE UNIQUE INDEX ix_rooms_public_id ON rooms (public_id)"))
 
         # notes.read_at (when recipient opened / marked read)
         row = conn.execute(

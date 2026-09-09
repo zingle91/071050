@@ -1,4 +1,5 @@
 from datetime import datetime
+import uuid
 from sqlalchemy import (
     String, Boolean, DateTime, ForeignKey, Text, Integer, UniqueConstraint
 )
@@ -54,6 +55,8 @@ class Room(Base):
     __tablename__ = "rooms"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Stable external identity. Display names are NOT unique; clients should use public_id.
+    public_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     room_type: Mapped[str] = mapped_column(String(20), nullable=False)  # direct | group
     created_by: Mapped[int | None] = mapped_column(ForeignKey("employees.id"), nullable=True)
