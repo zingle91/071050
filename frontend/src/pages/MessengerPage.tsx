@@ -1037,7 +1037,7 @@ export default function MessengerPage() {
                         {!n.is_read && <span className="note-unread-dot" aria-label="읽지 않음" />}
                       </div>
                       <div className="muted small">
-                        from {n.sender?.name || n.sender_id} · {new Date(n.created_at).toLocaleString()}
+                        보낸 사람: {n.sender?.name || n.sender_id} · {new Date(n.created_at).toLocaleString()}
                       </div>
                       <p className="note-card-preview">{noteBodyPreview(n.content)}</p>
                     </button>
@@ -1059,7 +1059,7 @@ export default function MessengerPage() {
                         <strong className="note-card-title">{n.subject || "(제목 없음)"}</strong>
                       </div>
                       <div className="muted small">
-                        to {n.recipient?.name || n.recipient_id} · {new Date(n.created_at).toLocaleString()}
+                        받는 사람: {n.recipient?.name || n.recipient_id} · {new Date(n.created_at).toLocaleString()}
                       </div>
                       <p className="note-card-preview">{noteBodyPreview(n.content)}</p>
                     </button>
