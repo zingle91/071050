@@ -108,9 +108,27 @@ button.ghost { background: transparent; color: #64748b; padding: 0.35rem 0.55rem
 .star-btn.on { color: #f59e0b; }
 .org-tree-toggle {
   background: transparent; color: #0f172a; display: flex; align-items: center; gap: 0.4rem;
-  padding: 0.35rem 0.25rem; width: 100%; text-align: left; border-radius: 6px;
+  padding: 0.35rem 0.25rem; flex: 1; text-align: left; border-radius: 6px; min-width: 0;
 }
 .org-tree-toggle:hover { background: #f1f5f9; }
 .org-tree-toggle .caret { font-size: 0.7rem; width: 1rem; color: #64748b; }
 .org-tree-children { margin-left: 0.5rem; border-left: 1px solid #e2e8f0; padding-left: 0.35rem; }
 .org-search-results, .org-fav-list { display: flex; flex-direction: column; gap: 0.15rem; }
+
+.org-picker-chips {
+  display: flex; flex-wrap: wrap; gap: 0.35rem;
+  padding: 0.55rem 1rem; border-bottom: 1px solid #e2e8f0; background: #f8fafc;
+  max-height: 88px; overflow: auto;
+}
+.chip-removable { display: inline-flex; align-items: center; gap: 0.2rem; padding-right: 0.25rem; }
+.chip-x {
+  background: transparent; color: #1e3a8a; padding: 0 0.25rem; font-size: 1rem; line-height: 1;
+  border: none; cursor: pointer;
+}
+.chip-x:hover { color: #b91c1c; }
+.org-tree-header { display: flex; align-items: center; gap: 0.25rem; }
+.org-tree-node-check {
+  display: flex; align-items: center; padding: 0.25rem;
+  cursor: pointer; flex-shrink: 0;
+}
+.org-tree-node-check input { width: auto; margin: 0; }

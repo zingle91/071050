@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import type { Employee, OrgTreeEmployee, OrgTreeNode } from "../api/types";
 
@@ -39,9 +39,54 @@ function flattenTree(node: OrgTreeNode, deptName = ""): FlatEmp[] {
   return list;
 }
 
+/** Collect selectable employee ids under a node (direct + descendants). */
+function collectDescendantIds(
+  node: OrgTreeNode,
+  includeBots: boolean,
+  exclude: Set<number>
+): number[] {
+  const ids: number[] = [];
+  for (const e of node.employees || []) {
+    if (!includeBots && e.is_bot) continue;
+    if (exclude.has(e.id)) continue;
+    ids.push(e.id);
+  }
+  for (const child of node.children || []) {
+    ids.push(...collectDescendantIds(child, includeBots, exclude));
+  }
+  return ids;
+}
+
+function NodeCheckbox({
+  checked,
+  indeterminate,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  indeterminate: boolean;
+  disabled?: boolean;
+  onChange: () => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = indeterminate && !checked;
+  }, [indeterminate, checked]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={checked}
+      disabled={disabled}
+      onChange={onChange}
+      onClick={(ev) => ev.stopPropagation()}
+    />
+  );
+}
+
 export default function OrgUserPicker({
   open,
-  title = "회사 조직도",
+  title = "직원 선택",
   confirmLabel = "확인",
   maxSelect,
   excludeIds = [],
@@ -98,6 +143,24 @@ export default function OrgUserPicker({
     return flattenTree(tree).filter((e) => includeBots || !e.is_bot);
   }, [tree, includeBots]);
 
+  const empById = useMemo(() => {
+    const byId = new Map<number, FlatEmp>();
+    for (const e of allFlat) byId.set(e.id, e);
+    for (const f of favorites) {
+      if (!byId.has(f.id)) {
+        byId.set(f.id, {
+          id: f.id,
+          employee_id: f.employee_id,
+          name: f.name,
+          is_bot: f.is_bot,
+          is_favorite: true,
+          departmentName: f.department?.name || "",
+        });
+      }
+    }
+    return byId;
+  }, [allFlat, favorites]);
+
   const favSet = useMemo(() => {
     const s = new Set<number>();
     for (const e of allFlat) if (e.is_favorite) s.add(e.id);
@@ -127,6 +190,20 @@ export default function OrgUserPicker({
     });
   }
 
+  function addIds(prev: Set<number>, ids: number[]): Set<number> {
+    const next = new Set(prev);
+    for (const id of ids) {
+      if (exclude.has(id)) continue;
+      if (next.has(id)) continue;
+      if (maxSelect === 1) {
+        return new Set([id]);
+      }
+      if (maxSelect && next.size >= maxSelect) break;
+      next.add(id);
+    }
+    return next;
+  }
+
   function toggleSelect(id: number) {
     if (exclude.has(id)) return;
     setSelected((prev) => {
@@ -135,15 +212,38 @@ export default function OrgUserPicker({
         next.delete(id);
         return next;
       }
-      if (maxSelect === 1) {
-        return new Set([id]);
-      }
-      if (maxSelect && next.size >= maxSelect) {
+      return addIds(prev, [id]);
+    });
+  }
+
+  /** Check parent = select all descendants; uncheck = clear those descendants. */
+  function toggleNodeSelect(node: OrgTreeNode) {
+    const ids = collectDescendantIds(node, includeBots, exclude);
+    if (!ids.length) return;
+    setSelected((prev) => {
+      const allOn = ids.every((id) => prev.has(id));
+      if (allOn) {
+        const next = new Set(prev);
+        for (const id of ids) next.delete(id);
         return next;
       }
-      next.add(id);
-      return next;
+      return addIds(prev, ids);
     });
+  }
+
+  function nodeCheckState(node: OrgTreeNode): {
+    checked: boolean;
+    indeterminate: boolean;
+    disabled: boolean;
+  } {
+    const ids = collectDescendantIds(node, includeBots, exclude);
+    if (!ids.length) return { checked: false, indeterminate: false, disabled: true };
+    const selectedCount = ids.filter((id) => selected.has(id)).length;
+    return {
+      checked: selectedCount === ids.length,
+      indeterminate: selectedCount > 0 && selectedCount < ids.length,
+      disabled: false,
+    };
   }
 
   async function toggleFavorite(empId: number, currentlyFav: boolean) {
@@ -155,7 +255,6 @@ export default function OrgUserPicker({
             body: JSON.stringify({ employee_id: empId }),
           });
       setFavorites(list);
-      // refresh tree favorite flags
       const t = await api<OrgTreeNode>("/api/org/tree");
       setTree(t);
     } catch (e) {
@@ -164,22 +263,8 @@ export default function OrgUserPicker({
   }
 
   function confirm() {
-    const byId = new Map(allFlat.map((e) => [e.id, e]));
-    // favorites may have employees not in flat if filtered bots — still include
-    for (const f of favorites) {
-      if (!byId.has(f.id)) {
-        byId.set(f.id, {
-          id: f.id,
-          employee_id: f.employee_id,
-          name: f.name,
-          is_bot: f.is_bot,
-          is_favorite: true,
-          departmentName: f.department?.name || "",
-        });
-      }
-    }
     const users: PickedUser[] = [...selected]
-      .map((id) => byId.get(id))
+      .map((id) => empById.get(id))
       .filter(Boolean)
       .map((e) => ({
         id: e!.id,
@@ -190,11 +275,25 @@ export default function OrgUserPicker({
     onConfirm(users);
   }
 
+  function removeChip(id: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }
+
   if (!open) return null;
 
   const selectedCount = selected.size;
+  const selectedUsers = [...selected]
+    .map((id) => empById.get(id))
+    .filter(Boolean) as FlatEmp[];
 
-  function renderEmpRow(e: FlatEmp | OrgTreeEmployee & { departmentName?: string }, showDept = false) {
+  function renderEmpRow(
+    e: FlatEmp | (OrgTreeEmployee & { departmentName?: string }),
+    showDept = false
+  ) {
     const disabled = exclude.has(e.id);
     const fav = favSet.has(e.id);
     return (
@@ -234,28 +333,37 @@ export default function OrgUserPicker({
     const key = node.node_type === "group" ? "root" : `dept-${node.id}`;
     const isOpen = expanded.has(key);
     const emps = (node.employees || []).filter((e) => includeBots || !e.is_bot);
+    const check = nodeCheckState(node);
     return (
       <div key={key} className="org-tree-node" style={{ marginLeft: depth ? 12 : 0 }}>
-        <button type="button" className="org-tree-toggle" onClick={() => toggleExpand(key)}>
-          <span className="caret">{isOpen ? "▼" : "▶"}</span>
-          <strong>{node.name}</strong>
-          {node.node_type === "department" && (
-            <span className="muted small"> ({emps.length})</span>
-          )}
-        </button>
+        <div className="org-tree-header">
+          <label className="org-tree-node-check" title="하위 직원 전체 선택/해제">
+            <NodeCheckbox
+              checked={check.checked}
+              indeterminate={check.indeterminate}
+              disabled={check.disabled}
+              onChange={() => toggleNodeSelect(node)}
+            />
+          </label>
+          <button type="button" className="org-tree-toggle" onClick={() => toggleExpand(key)}>
+            <span className="caret">{isOpen ? "▼" : "▶"}</span>
+            <strong>{node.name}</strong>
+            <span className="muted small">
+              {" "}
+              (
+              {collectDescendantIds(node, includeBots, exclude).length}
+              )
+            </span>
+          </button>
+        </div>
         {isOpen && (
           <div className="org-tree-children">
             {emps
               .filter((e) => !exclude.has(e.id) || selected.has(e.id))
-              .map((e) =>
-                renderEmpRow({ ...e, departmentName: node.name })
-              )}
-            {/* still show excluded as disabled */}
+              .map((e) => renderEmpRow({ ...e, departmentName: node.name }))}
             {emps
               .filter((e) => exclude.has(e.id) && !selected.has(e.id))
-              .map((e) =>
-                renderEmpRow({ ...e, departmentName: node.name })
-              )}
+              .map((e) => renderEmpRow({ ...e, departmentName: node.name }))}
             {(node.children || []).map((c) => renderDept(c, depth + 1))}
           </div>
         )}
@@ -310,6 +418,24 @@ export default function OrgUserPicker({
           </button>
         </div>
 
+        {selectedUsers.length > 0 && (
+          <div className="org-picker-chips">
+            {selectedUsers.map((u) => (
+              <span key={u.id} className="chip chip-removable">
+                {u.name}
+                <button
+                  type="button"
+                  className="chip-x"
+                  aria-label={`${u.name} 선택 해제`}
+                  onClick={() => removeChip(u.id)}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
         <div className="org-picker-body">
           {loading && <div className="center muted">불러오는 중...</div>}
           {error && <div className="error">{error}</div>}
@@ -339,14 +465,17 @@ export default function OrgUserPicker({
                 </div>
               ) : (
                 favList.map((e) =>
-                  renderEmpRow({
-                    id: e.id,
-                    employee_id: e.employee_id,
-                    name: e.name,
-                    is_bot: e.is_bot,
-                    is_favorite: true,
-                    departmentName: e.department?.name || "",
-                  }, true)
+                  renderEmpRow(
+                    {
+                      id: e.id,
+                      employee_id: e.employee_id,
+                      name: e.name,
+                      is_bot: e.is_bot,
+                      is_favorite: true,
+                      departmentName: e.department?.name || "",
+                    },
+                    true
+                  )
                 )
               )}
             </div>

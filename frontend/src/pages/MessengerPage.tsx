@@ -5,6 +5,7 @@ import { useAuth } from "../auth";
 import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
 
 type Tab = "chat" | "notes" | "org";
+/** Shared OrgUserPicker open modes — one component + one open flow (setPickerMode). */
 type PickerMode = "dm" | "group" | "note" | "invite" | null;
 
 export default function MessengerPage() {
@@ -26,6 +27,11 @@ export default function MessengerPage() {
   const [pickerMode, setPickerMode] = useState<PickerMode>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  /** Single shared entry to open OrgUserPicker for every flow. */
+  const openEmployeePicker = useCallback((mode: Exclude<PickerMode, null>) => {
+    setPickerMode(mode);
+  }, []);
 
   const activeRoom = useMemo(
     () => rooms.find((r) => r.id === activeRoomId) || null,
@@ -107,7 +113,7 @@ export default function MessengerPage() {
       return;
     }
     if (!groupMembers.length) {
-      setPickerMode("group");
+      openEmployeePicker("group");
       return;
     }
     const room = await api<Room>("/api/rooms", {
@@ -125,20 +131,46 @@ export default function MessengerPage() {
     setStatus("그룹 채팅방이 생성되었습니다");
   }
 
-  async function createDmWith(users: PickedUser[]) {
+  /**
+   * Chat start from 직원 선택:
+   * - 1 person → create/open 1:1 (direct)
+   * - 2+ people → create group room with those members (auto name)
+   */
+  async function startChatWith(users: PickedUser[]) {
     if (!users.length) return;
-    const target = users[0];
+    if (users.length === 1) {
+      const target = users[0];
+      const room = await api<Room>("/api/rooms", {
+        method: "POST",
+        body: JSON.stringify({
+          name: "1:1",
+          room_type: "direct",
+          member_ids: [target.id],
+        }),
+      });
+      await refreshRooms();
+      setActiveRoomId(room.id);
+      setStatus(`${target.name}님과 1:1 채팅을 시작합니다`);
+      return;
+    }
+    const preview = users
+      .slice(0, 3)
+      .map((u) => u.name)
+      .join(", ");
+    const name =
+      users.length > 3 ? `${preview} 외 ${users.length - 3}명` : preview;
     const room = await api<Room>("/api/rooms", {
       method: "POST",
       body: JSON.stringify({
-        name: "1:1",
-        room_type: "direct",
-        member_ids: [target.id],
+        name,
+        room_type: "group",
+        member_ids: users.map((u) => u.id),
       }),
     });
     await refreshRooms();
     setActiveRoomId(room.id);
-    setStatus(`${target.name}님과 1:1 채팅을 시작합니다`);
+    setTab("chat");
+    setStatus(`그룹 채팅방(${users.length}명)을 만들었습니다`);
   }
 
   async function inviteBot() {
@@ -163,7 +195,7 @@ export default function MessengerPage() {
 
   async function sendNote() {
     if (!noteRecipients.length) {
-      setPickerMode("note");
+      openEmployeePicker("note");
       return;
     }
     if (!noteBody.trim()) {
@@ -198,7 +230,7 @@ export default function MessengerPage() {
     setPickerMode(null);
     if (!users.length) return;
     if (mode === "dm") {
-      createDmWith(users).catch((e) => setStatus(e instanceof Error ? e.message : "실패"));
+      startChatWith(users).catch((e) => setStatus(e instanceof Error ? e.message : "실패"));
     } else if (mode === "group") {
       setGroupMembers(users);
     } else if (mode === "note") {
@@ -207,20 +239,6 @@ export default function MessengerPage() {
       inviteMembers(users).catch((e) => setStatus(e instanceof Error ? e.message : "실패"));
     }
   }
-
-  const pickerTitle =
-    pickerMode === "dm"
-      ? "1:1 상대 선택"
-      : pickerMode === "group"
-        ? "그룹 멤버 선택"
-        : pickerMode === "note"
-          ? "쪽지 수신자 선택"
-          : pickerMode === "invite"
-            ? "멤버 초대"
-            : "회사 조직도";
-
-  const pickerMax =
-    pickerMode === "dm" ? 1 : undefined;
 
   const pickerExclude = useMemo(() => {
     const ids = [user?.id].filter(Boolean) as number[];
@@ -231,6 +249,15 @@ export default function MessengerPage() {
   }, [user?.id, pickerMode, activeRoom]);
 
   const includeBots = pickerMode === "invite";
+
+  const confirmLabel =
+    pickerMode === "dm"
+      ? "시작"
+      : pickerMode === "invite"
+        ? "초대"
+        : pickerMode === "note"
+          ? "수신자 확정"
+          : "선택 완료";
 
   return (
     <div className="app-shell">
@@ -275,8 +302,8 @@ export default function MessengerPage() {
                   value={groupName}
                   onChange={(e) => setGroupName(e.target.value)}
                 />
-                <button type="button" className="secondary" onClick={() => setPickerMode("group")}>
-                  멤버 선택{groupMembers.length ? ` (${groupMembers.length})` : ""}
+                <button type="button" className="secondary" onClick={() => openEmployeePicker("group")}>
+                  직원 선택{groupMembers.length ? ` (${groupMembers.length})` : ""}
                 </button>
                 <button type="button" onClick={createGroup}>그룹 만들기</button>
               </div>
@@ -288,13 +315,21 @@ export default function MessengerPage() {
                 </div>
               )}
               <div className="create-row">
-                <button type="button" onClick={() => setPickerMode("dm")}>1:1 시작 (조직도)</button>
                 <button
                   type="button"
-                  onClick={() => setPickerMode("invite")}
+                  title="1명 선택 시 1:1, 여러 명 선택 시 그룹 채팅"
+                  onClick={() => openEmployeePicker("dm")}
+                >
+                  직원 선택
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  title="현재 그룹 채팅방에 멤버 초대"
+                  onClick={() => openEmployeePicker("invite")}
                   disabled={!activeRoomId || activeRoom?.room_type === "direct"}
                 >
-                  멤버 초대
+                  직원 선택
                 </button>
                 <button type="button" onClick={inviteBot} disabled={!activeRoomId}>AI 봇 초대</button>
               </div>
@@ -340,8 +375,8 @@ export default function MessengerPage() {
           <div className="notes-layout">
             <section>
               <h2>쪽지 보내기</h2>
-              <button type="button" className="secondary" onClick={() => setPickerMode("note")}>
-                수신자 선택 (조직도)
+              <button type="button" className="secondary" onClick={() => openEmployeePicker("note")}>
+                직원 선택
                 {noteRecipients.length ? ` · ${noteRecipients.length}명` : ""}
               </button>
               {noteRecipients.length > 0 && (
@@ -383,8 +418,8 @@ export default function MessengerPage() {
           <div className="org-layout">
             <div className="org-layout-head">
               <h2>조직도 / 직원 목록</h2>
-              <button type="button" className="secondary" onClick={() => setPickerMode("dm")}>
-                조직도에서 선택
+              <button type="button" className="secondary" onClick={() => openEmployeePicker("dm")}>
+                직원 선택
               </button>
             </div>
             <table>
@@ -413,17 +448,8 @@ export default function MessengerPage() {
 
       <OrgUserPicker
         open={pickerMode !== null}
-        title={pickerTitle}
-        confirmLabel={
-          pickerMode === "dm"
-            ? "1:1 시작"
-            : pickerMode === "invite"
-              ? "초대"
-              : pickerMode === "note"
-                ? "수신자 확정"
-                : "선택 완료"
-        }
-        maxSelect={pickerMax}
+        title="직원 선택"
+        confirmLabel={confirmLabel}
         excludeIds={pickerExclude}
         includeBots={includeBots}
         initialSelectedIds={
