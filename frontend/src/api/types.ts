@@ -50,6 +50,8 @@ export interface Room {
   /** Viewer membership: active | left | kicked */
   membership_status?: "active" | "left" | "kicked" | string;
   left_at?: string | null;
+  /** Latest message time incl. system; fallback created_at */
+  last_message_at?: string | null;
 }
 
 export interface Message {

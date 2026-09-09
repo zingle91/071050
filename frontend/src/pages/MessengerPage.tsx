@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { Employee, Message, Note, Room, UnreadUser } from "../api/types";
+import type { Message, Note, OrgTreeEmployee, OrgTreeNode, Room, UnreadUser } from "../api/types";
 import { computeMessageUnreadCount, formatUnread, isLeftRoom, roomTitle } from "../api/types";
 import { useAuth } from "../auth";
 import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
@@ -10,11 +10,36 @@ type Tab = "chat" | "notes" | "org";
 /** Shared OrgUserPicker open modes — one component + one open flow (setPickerMode). */
 type PickerMode = "dm" | "group" | "note" | "invite" | null;
 
+/** Sort rooms newest-activity first (API order + live WS bumps). */
+function roomActivityTs(r: Room): number {
+  const raw = r.last_message_at || r.created_at;
+  return new Date(raw).getTime() || 0;
+}
+
+function sortRoomsByRecent(rooms: Room[]): Room[] {
+  return [...rooms].sort((a, b) => roomActivityTs(b) - roomActivityTs(a));
+}
+
+/** Move a room to the top and optionally patch fields (live sidebar reorder). */
+function bumpRoomToTop(prev: Room[], roomId: number, patch: Partial<Room> = {}): Room[] {
+  const idx = prev.findIndex((r) => r.id === roomId);
+  if (idx < 0) return prev;
+  const now = patch.last_message_at || new Date().toISOString();
+  const updated: Room = { ...prev[idx], ...patch, last_message_at: now };
+  if (idx === 0) {
+    const copy = [...prev];
+    copy[0] = updated;
+    return copy;
+  }
+  return [updated, ...prev.filter((_, i) => i !== idx)];
+}
+
 export default function MessengerPage() {
   const { user, logout } = useAuth();
   const [tab, setTab] = useState<Tab>("chat");
   const [rooms, setRooms] = useState<Room[]>([]);
-  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [orgTree, setOrgTree] = useState<OrgTreeNode | null>(null);
+  const [orgExpanded, setOrgExpanded] = useState<Set<string>>(new Set(["root"]));
   const [activeRoomId, setActiveRoomId] = useState<number | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState("");
@@ -57,12 +82,15 @@ export default function MessengerPage() {
 
   const refreshRooms = useCallback(async () => {
     const data = await api<Room[]>("/api/rooms");
-    setRooms(data);
+    setRooms(sortRoomsByRecent(data));
     if (!activeRoomId && data.length) setActiveRoomId(data[0].id);
   }, [activeRoomId]);
 
   const refreshEmployees = useCallback(async () => {
-    setEmployees(await api<Employee[]>("/api/org/employees"));
+    const tree = await api<OrgTreeNode>("/api/org/tree");
+    setOrgTree(tree);
+    // Keep departments collapsed; only root open
+    setOrgExpanded(new Set(["root"]));
   }, []);
 
   const refreshNotes = useCallback(async () => {
@@ -210,29 +238,41 @@ export default function MessengerPage() {
       if (roomId == null) return;
       const viewing = activeRoomIdRef.current;
       const delta = typeof payload.unread_delta === "number" ? payload.unread_delta : 1;
+      const activityAt = msg.created_at || new Date().toISOString();
 
       if (viewing === roomId) {
         setMessages((prev) => {
           if (prev.some((m) => m.id === msg.id)) return prev;
           return [...prev, msg];
         });
-        setRooms((prev) =>
-          prev.map((r) => (r.id === roomId ? { ...r, unread_count: 0 } : r))
-        );
+        // Any message (incl. system) moves room to top
+        setRooms((prev) => bumpRoomToTop(prev, roomId, { unread_count: 0, last_message_at: activityAt }));
         markRoomRead(roomId).catch(console.error);
         return;
       }
 
-      // Inactive room: bump unread for others' messages only (not for left rooms / system)
-      if (msg.sender_id === user.id) return;
-      if (msg.is_system) return;
-      setRooms((prev) =>
-        prev.map((r) => {
-          if (r.id !== roomId) return r;
-          if (isLeftRoom(r)) return r;
-          return { ...r, unread_count: (r.unread_count || 0) + delta };
-        })
-      );
+      // Inactive room: always reorder by latest message; unread only for others' non-system
+      setRooms((prev) => {
+        if (!prev.some((r) => r.id === roomId)) {
+          queueMicrotask(() => {
+            refreshRooms().catch(console.error);
+          });
+          return prev;
+        }
+        const room = prev.find((r) => r.id === roomId)!;
+        let unread = room.unread_count || 0;
+        if (
+          !msg.is_system &&
+          msg.sender_id !== user.id &&
+          !isLeftRoom(room)
+        ) {
+          unread = unread + delta;
+        }
+        return bumpRoomToTop(prev, roomId, {
+          unread_count: unread,
+          last_message_at: activityAt,
+        });
+      });
     },
     [user, markRoomRead, refreshRooms]
   );
@@ -325,6 +365,12 @@ export default function MessengerPage() {
         body: JSON.stringify({ content }),
       });
       setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+      setRooms((prev) =>
+        bumpRoomToTop(prev, activeRoomId, {
+          unread_count: 0,
+          last_message_at: msg.created_at,
+        })
+      );
     } catch (e) {
       setStatus(e instanceof Error ? e.message : "전송 실패");
     }
@@ -565,6 +611,48 @@ export default function MessengerPage() {
   }, [user?.id, pickerMode, activeRoom]);
 
   const includeBots = pickerMode === "invite";
+
+
+  function toggleOrgExpand(key: string) {
+    setOrgExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function renderOrgBrowseNode(node: OrgTreeNode, depth: number) {
+    const key = node.node_type === "group" ? "root" : `dept-${node.id}`;
+    const isOpen = orgExpanded.has(key);
+    const emps = (node.employees || []).filter((e) => !e.is_bot);
+    const childCount =
+      (node.children || []).length + emps.length;
+    return (
+      <div key={key} className="org-tree-node" style={{ marginLeft: depth ? 12 : 0 }}>
+        <div className="org-tree-header">
+          <button type="button" className="org-tree-toggle" onClick={() => toggleOrgExpand(key)}>
+            <span className="caret">{isOpen ? "▼" : "▶"}</span>
+            <strong>{node.name}</strong>
+            <span className="muted small"> ({childCount})</span>
+          </button>
+        </div>
+        {isOpen && (
+          <div className="org-tree-children org-tree-vertical">
+            {(node.children || []).map((c) => renderOrgBrowseNode(c, depth + 1))}
+            {emps.map((e: OrgTreeEmployee) => (
+              <div key={e.id} className="org-picker-row org-browse-emp">
+                <span className="org-picker-name">
+                  {e.name}
+                  <span className="muted small"> ({e.employee_id})</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   const confirmLabel =
     pickerMode === "dm"
@@ -868,31 +956,23 @@ export default function MessengerPage() {
         {tab === "org" && (
           <div className="org-layout">
             <div className="org-layout-head">
-              <h2>조직도 / 직원 목록</h2>
+              <h2>조직도</h2>
               <button type="button" className="secondary" onClick={() => openEmployeePicker("dm")}>
                 직원 선택
               </button>
             </div>
-            <table>
-              <thead>
-                <tr>
-                  <th>사번</th>
-                  <th>이름</th>
-                  <th>부서</th>
-                  <th>구분</th>
-                </tr>
-              </thead>
-              <tbody>
-                {employees.map((e) => (
-                  <tr key={e.id}>
-                    <td>{e.employee_id}</td>
-                    <td>{e.name}</td>
-                    <td>{e.department?.name || "-"}</td>
-                    <td>{e.is_bot ? "AI 봇" : "직원"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <p className="muted small org-layout-hint">
+              조직을 클릭하면 하위 조직·소속 직원이 펼쳐집니다. 기본은 접힌 상태입니다.
+            </p>
+            <div className="org-tree-vertical org-browse-tree">
+              {orgTree ? (
+                renderOrgBrowseNode(orgTree, 0)
+              ) : (
+                <div className="muted center" style={{ padding: "2rem" }}>
+                  조직도를 불러오는 중…
+                </div>
+              )}
+            </div>
           </div>
         )}
       </main>

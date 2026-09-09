@@ -64,7 +64,7 @@ button.ghost { background: transparent; color: #64748b; padding: 0.35rem 0.55rem
   display: grid; place-items: center; z-index: 1000; padding: 1rem;
 }
 .org-picker-modal {
-  width: min(1000px, 96vw);
+  width: min(560px, 96vw);
   max-height: min(720px, 90vh);
   background: white;
   border-radius: 14px;
@@ -409,3 +409,25 @@ button.ghost { background: transparent; color: #64748b; padding: 0.35rem 0.55rem
 }
 button.danger-solid { background: #b91c1c; color: white; }
 button.danger-solid:hover { background: #991b1b; }
+
+
+/* Vertical hierarchical org chart */
+.org-tree-vertical {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  align-items: stretch;
+}
+.org-tree-node {
+  display: block;
+  width: 100%;
+}
+.org-browse-tree {
+  margin-top: 0.5rem;
+  max-width: 520px;
+}
+.org-layout-hint { margin: 0 0 0.75rem; }
+.org-browse-emp {
+  padding-left: 0.5rem;
+}
+.org-picker-row.org-browse-emp:hover { background: #f8fafc; }

@@ -82,6 +82,8 @@ class RoomOut(BaseModel):
     # Current viewer's membership: active | left | kicked
     membership_status: str = "active"
     left_at: datetime | None = None
+    # Latest message time (incl. system); falls back to created_at when empty
+    last_message_at: datetime | None = None
 
     class Config:
         from_attributes = True

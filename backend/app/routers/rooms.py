@@ -158,7 +158,12 @@ def _message_out(msg: Message, members: list[RoomMember], viewer_id: int | None 
     )
 
 
-def _room_out(room: Room, user_id: int, db: Session) -> RoomOut:
+def _room_out(
+    room: Room,
+    user_id: int,
+    db: Session,
+    last_message_at: datetime | None = None,
+) -> RoomOut:
     membership = next((m for m in room.members if m.employee_id == user_id), None)
     display_name = membership.display_name if membership else None
     status = (membership.status if membership else "active") or "active"
@@ -168,6 +173,12 @@ def _room_out(room: Room, user_id: int, db: Session) -> RoomOut:
     unread = 0
     if membership and status == "active":
         unread = _unread_count(db, room.id, user_id, membership.last_read_at)
+    if last_message_at is None:
+        last_message_at = (
+            db.query(func.max(Message.created_at))
+            .filter(Message.room_id == room.id)
+            .scalar()
+        )
     return RoomOut(
         id=room.id,
         name=room.name,
@@ -178,6 +189,7 @@ def _room_out(room: Room, user_id: int, db: Session) -> RoomOut:
         unread_count=unread,
         membership_status=status,
         left_at=left_at,
+        last_message_at=last_message_at or room.created_at,
     )
 
 
@@ -338,14 +350,30 @@ def list_rooms(
     room_ids = _user_room_ids(db, current_user.id)
     if not room_ids:
         return []
-    rooms = (
-        db.query(Room)
-        .options(joinedload(Room.members).joinedload(RoomMember.employee).joinedload(Employee.department))
+    last_msg_sq = (
+        db.query(
+            Message.room_id.label("room_id"),
+            func.max(Message.created_at).label("last_at"),
+        )
+        .group_by(Message.room_id)
+        .subquery()
+    )
+    rows = (
+        db.query(Room, last_msg_sq.c.last_at)
+        .outerjoin(last_msg_sq, Room.id == last_msg_sq.c.room_id)
+        .options(
+            joinedload(Room.members)
+            .joinedload(RoomMember.employee)
+            .joinedload(Employee.department)
+        )
         .filter(Room.id.in_(room_ids))
-        .order_by(Room.created_at.desc())
+        .order_by(func.coalesce(last_msg_sq.c.last_at, Room.created_at).desc())
         .all()
     )
-    return [_room_out(r, current_user.id, db) for r in rooms]
+    return [
+        _room_out(room, current_user.id, db, last_message_at=last_at)
+        for room, last_at in rows
+    ]
 
 
 @router.post("", response_model=RoomOut)

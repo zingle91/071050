@@ -116,11 +116,9 @@ export default function OrgUserPicker({
       ]);
       setTree(t);
       setFavorites(f);
-      const expand = new Set<string>(["root"]);
-      for (const c of t.children || []) {
-        expand.add(`dept-${c.id}`);
-      }
-      setExpanded(expand);
+      // Only root (One2그룹) open by default; departments stay collapsed
+      // so employees appear only after the user expands a unit.
+      setExpanded(new Set<string>(["root"]));
     } catch (e) {
       setError(e instanceof Error ? e.message : "조직도를 불러오지 못했습니다");
     } finally {
@@ -357,14 +355,15 @@ export default function OrgUserPicker({
           </button>
         </div>
         {isOpen && (
-          <div className="org-tree-children">
+          <div className="org-tree-children org-tree-vertical">
+            {/* Child organizations first (parent above children), then this unit's employees */}
+            {(node.children || []).map((c) => renderDept(c, depth + 1))}
             {emps
               .filter((e) => !exclude.has(e.id) || selected.has(e.id))
               .map((e) => renderEmpRow({ ...e, departmentName: node.name }))}
             {emps
               .filter((e) => exclude.has(e.id) && !selected.has(e.id))
               .map((e) => renderEmpRow({ ...e, departmentName: node.name }))}
-            {(node.children || []).map((c) => renderDept(c, depth + 1))}
           </div>
         )}
       </div>
@@ -453,7 +452,9 @@ export default function OrgUserPicker({
             </div>
           )}
 
-          {!loading && !filtered && tab === "org" && tree && renderDept(tree, 0)}
+          {!loading && !filtered && tab === "org" && tree && (
+            <div className="org-tree-vertical">{renderDept(tree, 0)}</div>
+          )}
 
           {!loading && !filtered && tab === "fav" && (
             <div className="org-fav-list">
