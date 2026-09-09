@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from app.auth import hash_password
-from app.models import Department, Employee, Room, RoomMember, Message, Note
+from app.models import Department, Employee, Room, RoomMember, Message, Note, FavoriteEmployee
 
 
 SEED_PASSWORD = "1q2w3e1!"
@@ -20,6 +20,7 @@ HUMAN_USERS = [
 
 
 def _clear_all(db: Session) -> None:
+    db.query(FavoriteEmployee).delete()
     db.query(Message).delete()
     db.query(Note).delete()
     db.query(RoomMember).delete()
@@ -31,16 +32,30 @@ def _clear_all(db: Session) -> None:
 
 def seed_database(db: Session) -> None:
     if db.query(Employee).filter(Employee.employee_id == "F00001").first():
+        # Ensure One2그룹 root exists for already-seeded DBs
+        root = db.query(Department).filter(Department.code == "ONE2").first()
+        if not root:
+            root = Department(name="One2그룹", code="ONE2", parent_id=None)
+            db.add(root)
+            db.flush()
+            for d in db.query(Department).filter(Department.code != "ONE2").all():
+                if d.parent_id is None:
+                    d.parent_id = root.id
+            db.commit()
         return
 
     # Re-seed when old E00x (or any other) demo data exists
     if db.query(Employee).first():
         _clear_all(db)
 
+    root = Department(name="One2그룹", code="ONE2", parent_id=None)
+    db.add(root)
+    db.flush()
+
     depts = [
-        Department(name="경영지원팀", code="HQ"),
-        Department(name="개발팀", code="DEV"),
-        Department(name="영업팀", code="SALES"),
+        Department(name="경영지원팀", code="HQ", parent_id=root.id),
+        Department(name="개발팀", code="DEV", parent_id=root.id),
+        Department(name="영업팀", code="SALES", parent_id=root.id),
     ]
     db.add_all(depts)
     db.flush()

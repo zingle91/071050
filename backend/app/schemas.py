@@ -16,6 +16,7 @@ class DepartmentOut(BaseModel):
     id: int
     name: str
     code: str
+    parent_id: int | None = None
 
     class Config:
         from_attributes = True
@@ -31,6 +32,26 @@ class EmployeeOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class OrgTreeEmployee(BaseModel):
+    id: int
+    employee_id: str
+    name: str
+    is_bot: bool = False
+    is_favorite: bool = False
+
+
+class OrgTreeNode(BaseModel):
+    id: int | None = None  # None for virtual root if needed
+    name: str
+    code: str | None = None
+    node_type: str  # group | department
+    employees: list[OrgTreeEmployee] = []
+    children: list["OrgTreeNode"] = []
+
+
+OrgTreeNode.model_rebuild()
 
 
 class RoomCreate(BaseModel):
@@ -57,6 +78,10 @@ class RoomOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class RoomInviteRequest(BaseModel):
+    member_ids: list[int]
 
 
 class MessageCreate(BaseModel):
@@ -98,3 +123,7 @@ class NoteOut(BaseModel):
 
 class InviteBotRequest(BaseModel):
     room_id: int
+
+
+class FavoriteToggleRequest(BaseModel):
+    employee_id: int

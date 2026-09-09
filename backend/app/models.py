@@ -12,7 +12,12 @@ class Department(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), nullable=True)
 
+    parent: Mapped["Department | None"] = relationship(
+        remote_side="Department.id", back_populates="children"
+    )
+    children: Mapped[list["Department"]] = relationship(back_populates="parent")
     employees: Mapped[list["Employee"]] = relationship(back_populates="department")
 
 
@@ -20,7 +25,7 @@ class Employee(Base):
     __tablename__ = "employees"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    employee_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)  # 사번
+    employee_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)  # ??
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     department_id: Mapped[int | None] = mapped_column(ForeignKey("departments.id"), nullable=True)
@@ -30,6 +35,19 @@ class Employee(Base):
 
     department: Mapped[Department | None] = relationship(back_populates="employees")
     room_memberships: Mapped[list["RoomMember"]] = relationship(back_populates="employee")
+
+
+class FavoriteEmployee(Base):
+    """Per-user favorited employees for the org picker ???? tab."""
+    __tablename__ = "favorite_employees"
+    __table_args__ = (UniqueConstraint("owner_id", "employee_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employees.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    employee: Mapped[Employee] = relationship(foreign_keys=[employee_id])
 
 
 class Room(Base):

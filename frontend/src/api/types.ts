@@ -2,6 +2,7 @@ export interface Department {
   id: number;
   name: string;
   code: string;
+  parent_id?: number | null;
 }
 
 export interface Employee {
@@ -11,6 +12,23 @@ export interface Employee {
   department_id?: number | null;
   department?: Department | null;
   is_bot: boolean;
+}
+
+export interface OrgTreeEmployee {
+  id: number;
+  employee_id: string;
+  name: string;
+  is_bot: boolean;
+  is_favorite: boolean;
+}
+
+export interface OrgTreeNode {
+  id: number | null;
+  name: string;
+  code: string | null;
+  node_type: "group" | "department" | string;
+  employees: OrgTreeEmployee[];
+  children: OrgTreeNode[];
 }
 
 export interface RoomMember {

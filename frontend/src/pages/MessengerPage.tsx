@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, wsUrl } from "../api/client";
 import type { Employee, Message, Note, Room } from "../api/types";
 import { useAuth } from "../auth";
+import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
 
 type Tab = "chat" | "notes" | "org";
+type PickerMode = "dm" | "group" | "note" | "invite" | null;
 
 export default function MessengerPage() {
   const { user, logout } = useAuth();
@@ -17,10 +19,11 @@ export default function MessengerPage() {
   const [sentNotes, setSentNotes] = useState<Note[]>([]);
   const [noteSubject, setNoteSubject] = useState("");
   const [noteBody, setNoteBody] = useState("");
-  const [noteTo, setNoteTo] = useState<number | "">("");
+  const [noteRecipients, setNoteRecipients] = useState<PickedUser[]>([]);
   const [groupName, setGroupName] = useState("");
-  const [dmTarget, setDmTarget] = useState<number | "">("");
+  const [groupMembers, setGroupMembers] = useState<PickedUser[]>([]);
   const [status, setStatus] = useState("");
+  const [pickerMode, setPickerMode] = useState<PickerMode>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -99,34 +102,43 @@ export default function MessengerPage() {
   }
 
   async function createGroup() {
-    if (!groupName.trim()) return;
+    if (!groupName.trim()) {
+      setStatus("그룹 이름을 입력하세요");
+      return;
+    }
+    if (!groupMembers.length) {
+      setPickerMode("group");
+      return;
+    }
     const room = await api<Room>("/api/rooms", {
       method: "POST",
       body: JSON.stringify({
         name: groupName,
         room_type: "group",
-        member_ids: employees.filter((e) => !e.is_bot && e.id !== user?.id).map((e) => e.id),
+        member_ids: groupMembers.map((m) => m.id),
       }),
     });
     setGroupName("");
+    setGroupMembers([]);
     await refreshRooms();
     setActiveRoomId(room.id);
     setStatus("그룹 채팅방이 생성되었습니다");
   }
 
-  async function createDm() {
-    if (!dmTarget) return;
+  async function createDmWith(users: PickedUser[]) {
+    if (!users.length) return;
+    const target = users[0];
     const room = await api<Room>("/api/rooms", {
       method: "POST",
       body: JSON.stringify({
         name: "1:1",
         room_type: "direct",
-        member_ids: [Number(dmTarget)],
+        member_ids: [target.id],
       }),
     });
-    setDmTarget("");
     await refreshRooms();
     setActiveRoomId(room.id);
+    setStatus(`${target.name}님과 1:1 채팅을 시작합니다`);
   }
 
   async function inviteBot() {
@@ -139,21 +151,41 @@ export default function MessengerPage() {
     setStatus("AI 봇을 초대했습니다. 메시지에 @AI 를 포함하거나 ? 로 시작하면 답합니다.");
   }
 
-  async function sendNote() {
-    if (!noteTo || !noteBody.trim()) return;
-    await api<Note>("/api/notes", {
+  async function inviteMembers(users: PickedUser[]) {
+    if (!activeRoomId || !users.length) return;
+    const room = await api<Room>(`/api/rooms/${activeRoomId}/members`, {
       method: "POST",
-      body: JSON.stringify({
-        recipient_id: Number(noteTo),
-        subject: noteSubject,
-        content: noteBody,
-      }),
+      body: JSON.stringify({ member_ids: users.map((u) => u.id) }),
     });
+    setRooms((prev) => prev.map((r) => (r.id === room.id ? room : r)));
+    setStatus(`${users.length}명을 초대했습니다`);
+  }
+
+  async function sendNote() {
+    if (!noteRecipients.length) {
+      setPickerMode("note");
+      return;
+    }
+    if (!noteBody.trim()) {
+      setStatus("쪽지 내용을 입력하세요");
+      return;
+    }
+    const recipients = [...noteRecipients];
+    for (const r of recipients) {
+      await api<Note>("/api/notes", {
+        method: "POST",
+        body: JSON.stringify({
+          recipient_id: r.id,
+          subject: noteSubject,
+          content: noteBody,
+        }),
+      });
+    }
     setNoteSubject("");
     setNoteBody("");
-    setNoteTo("");
+    setNoteRecipients([]);
     await refreshNotes();
-    setStatus("쪽지를 보냈습니다");
+    setStatus(`쪽지를 ${recipients.length}명에게 보냈습니다`);
   }
 
   async function markRead(id: number) {
@@ -161,7 +193,44 @@ export default function MessengerPage() {
     await refreshNotes();
   }
 
-  const humans = employees.filter((e) => !e.is_bot);
+  function handlePickerConfirm(users: PickedUser[]) {
+    const mode = pickerMode;
+    setPickerMode(null);
+    if (!users.length) return;
+    if (mode === "dm") {
+      createDmWith(users).catch((e) => setStatus(e instanceof Error ? e.message : "실패"));
+    } else if (mode === "group") {
+      setGroupMembers(users);
+    } else if (mode === "note") {
+      setNoteRecipients(users);
+    } else if (mode === "invite") {
+      inviteMembers(users).catch((e) => setStatus(e instanceof Error ? e.message : "실패"));
+    }
+  }
+
+  const pickerTitle =
+    pickerMode === "dm"
+      ? "1:1 상대 선택"
+      : pickerMode === "group"
+        ? "그룹 멤버 선택"
+        : pickerMode === "note"
+          ? "쪽지 수신자 선택"
+          : pickerMode === "invite"
+            ? "멤버 초대"
+            : "회사 조직도";
+
+  const pickerMax =
+    pickerMode === "dm" ? 1 : undefined;
+
+  const pickerExclude = useMemo(() => {
+    const ids = [user?.id].filter(Boolean) as number[];
+    if (pickerMode === "invite" && activeRoom) {
+      for (const m of activeRoom.members) ids.push(m.employee_id);
+    }
+    return ids;
+  }, [user?.id, pickerMode, activeRoom]);
+
+  const includeBots = pickerMode === "invite";
 
   return (
     <div className="app-shell">
@@ -201,18 +270,33 @@ export default function MessengerPage() {
           <div className="chat-layout">
             <div className="chat-toolbar">
               <div className="create-row">
-                <input placeholder="그룹 이름" value={groupName} onChange={(e) => setGroupName(e.target.value)} />
-                <button onClick={createGroup}>그룹 만들기</button>
+                <input
+                  placeholder="그룹 이름"
+                  value={groupName}
+                  onChange={(e) => setGroupName(e.target.value)}
+                />
+                <button type="button" className="secondary" onClick={() => setPickerMode("group")}>
+                  멤버 선택{groupMembers.length ? ` (${groupMembers.length})` : ""}
+                </button>
+                <button type="button" onClick={createGroup}>그룹 만들기</button>
               </div>
-              <div className="create-row">
-                <select value={dmTarget} onChange={(e) => setDmTarget(e.target.value ? Number(e.target.value) : "")}>
-                  <option value="">1:1 상대 선택</option>
-                  {humans.filter((e) => e.id !== user?.id).map((e) => (
-                    <option key={e.id} value={e.id}>{e.name} ({e.employee_id})</option>
+              {groupMembers.length > 0 && (
+                <div className="picked-chips">
+                  {groupMembers.map((m) => (
+                    <span key={m.id} className="chip">{m.name}</span>
                   ))}
-                </select>
-                <button onClick={createDm}>1:1 시작</button>
-                <button onClick={inviteBot} disabled={!activeRoomId}>AI 봇 초대</button>
+                </div>
+              )}
+              <div className="create-row">
+                <button type="button" onClick={() => setPickerMode("dm")}>1:1 시작 (조직도)</button>
+                <button
+                  type="button"
+                  onClick={() => setPickerMode("invite")}
+                  disabled={!activeRoomId || activeRoom?.room_type === "direct"}
+                >
+                  멤버 초대
+                </button>
+                <button type="button" onClick={inviteBot} disabled={!activeRoomId}>AI 봇 초대</button>
               </div>
             </div>
 
@@ -256,12 +340,17 @@ export default function MessengerPage() {
           <div className="notes-layout">
             <section>
               <h2>쪽지 보내기</h2>
-              <select value={noteTo} onChange={(e) => setNoteTo(e.target.value ? Number(e.target.value) : "")}>
-                <option value="">수신자 선택</option>
-                {humans.filter((e) => e.id !== user?.id).map((e) => (
-                  <option key={e.id} value={e.id}>{e.name} ({e.employee_id})</option>
-                ))}
-              </select>
+              <button type="button" className="secondary" onClick={() => setPickerMode("note")}>
+                수신자 선택 (조직도)
+                {noteRecipients.length ? ` · ${noteRecipients.length}명` : ""}
+              </button>
+              {noteRecipients.length > 0 && (
+                <div className="picked-chips">
+                  {noteRecipients.map((m) => (
+                    <span key={m.id} className="chip">{m.name}</span>
+                  ))}
+                </div>
+              )}
               <input placeholder="제목" value={noteSubject} onChange={(e) => setNoteSubject(e.target.value)} />
               <textarea placeholder="내용" value={noteBody} onChange={(e) => setNoteBody(e.target.value)} rows={4} />
               <button onClick={sendNote}>보내기</button>
@@ -292,7 +381,12 @@ export default function MessengerPage() {
 
         {tab === "org" && (
           <div className="org-layout">
-            <h2>조직도 / 직원 목록</h2>
+            <div className="org-layout-head">
+              <h2>조직도 / 직원 목록</h2>
+              <button type="button" className="secondary" onClick={() => setPickerMode("dm")}>
+                조직도에서 선택
+              </button>
+            </div>
             <table>
               <thead>
                 <tr>
@@ -316,6 +410,32 @@ export default function MessengerPage() {
           </div>
         )}
       </main>
+
+      <OrgUserPicker
+        open={pickerMode !== null}
+        title={pickerTitle}
+        confirmLabel={
+          pickerMode === "dm"
+            ? "1:1 시작"
+            : pickerMode === "invite"
+              ? "초대"
+              : pickerMode === "note"
+                ? "수신자 확정"
+                : "선택 완료"
+        }
+        maxSelect={pickerMax}
+        excludeIds={pickerExclude}
+        includeBots={includeBots}
+        initialSelectedIds={
+          pickerMode === "group"
+            ? groupMembers.map((m) => m.id)
+            : pickerMode === "note"
+              ? noteRecipients.map((m) => m.id)
+              : []
+        }
+        onClose={() => setPickerMode(null)}
+        onConfirm={handlePickerConfirm}
+      />
     </div>
   );
 }

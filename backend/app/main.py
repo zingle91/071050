@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 from app.config import settings
@@ -22,10 +23,32 @@ def wait_for_db(retries: int = 30, delay: float = 1.0):
     raise RuntimeError("Database not available")
 
 
+def ensure_schema():
+    """Add columns/tables that create_all may miss on existing DBs."""
+    with engine.begin() as conn:
+        # departments.parent_id
+        row = conn.execute(
+            text(
+                """
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'departments' AND column_name = 'parent_id'
+                """
+            )
+        ).first()
+        if not row:
+            conn.execute(
+                text(
+                    "ALTER TABLE departments ADD COLUMN parent_id INTEGER "
+                    "REFERENCES departments(id)"
+                )
+            )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     wait_for_db()
     Base.metadata.create_all(bind=engine)
+    ensure_schema()
     db = SessionLocal()
     try:
         seed_database(db)

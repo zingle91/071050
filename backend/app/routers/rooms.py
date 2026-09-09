@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Employee, Room, RoomMember, Message
-from app.schemas import RoomCreate, RoomOut, MessageCreate, MessageOut, InviteBotRequest
+from app.schemas import RoomCreate, RoomOut, MessageCreate, MessageOut, InviteBotRequest, RoomInviteRequest
 
 router = APIRouter(prefix="/api/rooms", tags=["rooms"])
 
@@ -160,6 +160,45 @@ async def post_message(
             await manager.broadcast(room_id, {"type": "message", "data": bot_payload})
 
     return msg
+
+
+
+
+@router.post("/{room_id}/members", response_model=RoomOut)
+def invite_members(
+    room_id: int,
+    body: RoomInviteRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[Employee, Depends(get_current_user)],
+):
+    if room_id not in _user_room_ids(db, current_user.id):
+        raise HTTPException(status_code=403, detail="해당 채팅방 권한이 없습니다")
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="채팅방을 찾을 수 없습니다")
+    if room.room_type == "direct":
+        raise HTTPException(status_code=400, detail="1:1 채팅에는 멤버를 추가할 수 없습니다")
+    if not body.member_ids:
+        raise HTTPException(status_code=400, detail="초대할 직원을 선택하세요")
+
+    existing_ids = {
+        m.employee_id
+        for m in db.query(RoomMember).filter(RoomMember.room_id == room_id).all()
+    }
+    for mid in body.member_ids:
+        if mid in existing_ids:
+            continue
+        emp = db.query(Employee).filter(Employee.id == mid, Employee.is_active == True).first()  # noqa: E712
+        if not emp:
+            raise HTTPException(status_code=400, detail=f"존재하지 않는 직원 id: {mid}")
+        db.add(RoomMember(room_id=room_id, employee_id=mid))
+    db.commit()
+    return (
+        db.query(Room)
+        .options(joinedload(Room.members).joinedload(RoomMember.employee))
+        .filter(Room.id == room_id)
+        .one()
+    )
 
 
 @router.post("/invite-bot", response_model=RoomOut)
