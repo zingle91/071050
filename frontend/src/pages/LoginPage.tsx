@@ -4,8 +4,8 @@ import { useAuth } from "../auth";
 
 export default function LoginPage() {
   const { user, login } = useAuth();
-  const [employeeId, setEmployeeId] = useState("E001");
-  const [password, setPassword] = useState("password123");
+  const [employeeId, setEmployeeId] = useState("F00001");
+  const [password, setPassword] = useState("1q2w3e1!");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -34,7 +34,7 @@ export default function LoginPage() {
           <input
             value={employeeId}
             onChange={(e) => setEmployeeId(e.target.value)}
-            placeholder="예: E001"
+            placeholder="예: F00001"
             autoFocus
           />
         </label>
@@ -51,7 +51,7 @@ export default function LoginPage() {
           {busy ? "로그인 중..." : "로그인"}
         </button>
         <div className="hint">
-          데모 계정: E001~E004 / password123
+          데모 계정: F00001~F00010 / 1q2w3e1!
         </div>
       </form>
     </div>

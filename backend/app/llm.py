@@ -53,7 +53,7 @@ def _mock_reply(user_message: str, room_name: str = "") -> str:
     if any(k in msg for k in ("부서", "조직", "사번")):
         return (
             "조직 정보는 좌측 '조직도' 메뉴에서 확인할 수 있습니다. "
-            "데모 계정 사번: E001~E004, 비밀번호: password123"
+            "데모 계정 사번: F00001~F00010, 비밀번호: 1q2w3e1!"
         )
     room_hint = f" ({room_name})" if room_name else ""
     return (
