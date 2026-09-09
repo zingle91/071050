@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Employee, Note
-from app.schemas import NoteCreate, NoteOut, NotesUnreadCount
+from app.schemas import EmployeeOut, NoteCreate, NoteOut, NotesUnreadCount
 from app.ws_manager import manager
 
 router = APIRouter(prefix="/api/notes", tags=["notes"])
@@ -73,6 +73,44 @@ async def _notify_note_read(user_id: int, note: Note, unread_count: int):
             "data": payload,
         },
     )
+
+
+
+def _batch_recipient_employees(db: Session, note: Note) -> list[Employee]:
+    """Find co-recipients of the same multi-send batch (same sender/subject/content ~time)."""
+    window_start = note.created_at - timedelta(seconds=3)
+    window_end = note.created_at + timedelta(seconds=3)
+    peers = (
+        db.query(Note)
+        .options(joinedload(Note.recipient))
+        .filter(
+            Note.sender_id == note.sender_id,
+            Note.subject == note.subject,
+            Note.content == note.content,
+            Note.created_at >= window_start,
+            Note.created_at <= window_end,
+        )
+        .all()
+    )
+    seen: set[int] = set()
+    out: list[Employee] = []
+    for peer in peers:
+        r = peer.recipient
+        if r is None or r.id in seen:
+            continue
+        seen.add(r.id)
+        out.append(r)
+    if not out and note.recipient is not None:
+        out.append(note.recipient)
+    return out
+
+
+def _note_out_with_recipients(db: Session, note: Note) -> NoteOut:
+    payload = NoteOut.model_validate(note)
+    payload.recipients = [
+        EmployeeOut.model_validate(e) for e in _batch_recipient_employees(db, note)
+    ]
+    return payload
 
 
 def _unread_count_for(db: Session, user_id: int) -> int:
@@ -151,7 +189,7 @@ async def get_note(
         note = _load_note(db, note.id)
         count = _unread_count_for(db, current_user.id)
         await _notify_note_read(current_user.id, note, count)
-    return note
+    return _note_out_with_recipients(db, note)
 
 
 @router.post("", response_model=list[NoteOut])

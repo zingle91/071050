@@ -88,6 +88,8 @@ export interface Note {
   created_at: string;
   sender?: Employee | null;
   recipient?: Employee | null;
+  /** Co-recipients from multi-send batch (detail GET) */
+  recipients?: Employee[];
 }
 
 export interface NotesUnreadCount {

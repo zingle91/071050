@@ -564,3 +564,41 @@ button.danger-solid:hover { background: #991b1b; }
   padding-left: 0.5rem;
 }
 .org-picker-row.org-browse-emp:hover { background: #f8fafc; }
+
+/* Standalone note detail popup window */
+.note-popup-page {
+  min-height: 100vh;
+  margin: 0;
+  padding: 1.25rem;
+  background: #f1f5f9;
+  box-sizing: border-box;
+}
+.note-popup-card {
+  max-width: 720px;
+  margin: 0 auto;
+  background: white;
+  border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+  border: 1px solid #e2e8f0;
+  padding: 1.1rem 1.25rem 1.25rem;
+  display: grid;
+  gap: 0.85rem;
+}
+.note-popup-card h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+.note-detail-meta {
+  display: grid;
+  gap: 0.2rem;
+}
+.note-detail-actions-row {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.note-detail-actions-row button {
+  flex: 0 0 auto;
+}

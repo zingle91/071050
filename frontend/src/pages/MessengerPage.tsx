@@ -5,6 +5,11 @@ import { computeMessageUnreadCount, formatUnread, isLeftRoom, roomTitle } from "
 import { useAuth } from "../auth";
 import OrgUserPicker, { type PickedUser } from "../components/OrgUserPicker";
 import { useUserRealtime, type RealtimePayload } from "../hooks/useUserRealtime";
+import {
+  NOTE_COMPOSE_MSG,
+  readStoredComposeDraft,
+  type NoteComposeDraft,
+} from "../noteCompose";
 
 type Tab = "chat" | "notes" | "org";
 /** Shared OrgUserPicker open modes — one component + one open flow (setPickerMode). */
@@ -52,7 +57,6 @@ export default function MessengerPage() {
   const [notesSubTab, setNotesSubTab] = useState<"inbox" | "sent">("inbox");
   const [notesUnread, setNotesUnread] = useState(0);
   const [noteComposeOpen, setNoteComposeOpen] = useState(false);
-  const [noteDetail, setNoteDetail] = useState<Note | null>(null);
   const [noteSending, setNoteSending] = useState(false);
   const [groupName, setGroupName] = useState("");
   const [groupMembers, setGroupMembers] = useState<PickedUser[]>([]);
@@ -148,7 +152,6 @@ export default function MessengerPage() {
         }
         if (payload.action === "read" && note) {
           setInbox((prev) => prev.map((n) => (n.id === note.id ? { ...n, ...note } : n)));
-          setNoteDetail((cur) => (cur && cur.id === note.id ? { ...cur, ...note } : cur));
         }
         if (count == null) {
           queueMicrotask(() => {
@@ -320,6 +323,21 @@ export default function MessengerPage() {
     if (tab !== "notes") return;
     refreshNotes().catch(console.error);
   }, [tab, refreshNotes]);
+
+  // Compose drafts from note detail popup (postMessage) or sessionStorage fallback
+  useEffect(() => {
+    function onMessage(ev: MessageEvent) {
+      if (ev.origin !== window.location.origin) return;
+      const data = ev.data;
+      if (!data || data.source !== NOTE_COMPOSE_MSG || !data.draft) return;
+      applyNoteComposeDraft(data.draft as NoteComposeDraft);
+    }
+    window.addEventListener("message", onMessage);
+    const stored = readStoredComposeDraft();
+    if (stored) applyNoteComposeDraft(stored);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
 
   useEffect(() => {
     const onFocus = () => {
@@ -552,21 +570,35 @@ export default function MessengerPage() {
     }
   }
 
-  async function openNoteDetail(n: Note) {
-    try {
-      const detail = await api<Note>(`/api/notes/${n.id}`);
-      setNoteDetail(detail);
-      if (!n.is_read && detail.is_read) {
-        setInbox((prev) => prev.map((x) => (x.id === detail.id ? { ...x, ...detail } : x)));
-        setNotesUnread((c) => Math.max(0, c - 1));
-      } else {
-        setInbox((prev) => prev.map((x) => (x.id === detail.id ? { ...x, ...detail } : x)));
-      }
-      await refreshNotesUnread();
-    } catch (e) {
-      setStatus(e instanceof Error ? e.message : "쪽지를 열 수 없습니다");
-    }
+  function applyNoteComposeDraft(draft: NoteComposeDraft) {
+    setNoteSubject(draft.subject || "");
+    setNoteBody(draft.body || "");
+    setNoteRecipients(draft.recipients || []);
+    setNoteComposeOpen(true);
+    setTab("notes");
   }
+
+  function openNoteDetail(n: Note) {
+    const url = `${window.location.origin}/notes/${n.id}`;
+    // Standalone resizable browser popup (no fixed size lock / no resize disable).
+    const features = "popup=yes,resizable=yes,scrollbars=yes";
+    const win = window.open(url, `note-detail-${n.id}`, features);
+    if (!win) {
+      setStatus("팝업이 차단되었습니다. 브라우저에서 팝업을 허용해 주세요.");
+      return;
+    }
+    // Optimistic unread update; popup GET marks read and WS refreshes badge.
+    if (!n.is_read) {
+      setInbox((prev) =>
+        prev.map((x) =>
+          x.id === n.id ? { ...x, is_read: true, read_at: x.read_at || new Date().toISOString() } : x
+        )
+      );
+      setNotesUnread((c) => Math.max(0, c - 1));
+    }
+    win.focus();
+  }
+
 
   function openRenameDialog() {
     if (!activeRoom) return;
@@ -1298,43 +1330,6 @@ export default function MessengerPage() {
         onConfirm={handlePickerConfirm}
       />
 
-      {noteDetail && (
-        <div className="modal-overlay" onClick={() => setNoteDetail(null)}>
-          <div
-            className="note-detail-modal"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-labelledby="note-detail-title"
-          >
-            <div className="note-detail-header">
-              <h2 id="note-detail-title">{noteDetail.subject || "(제목 없음)"}</h2>
-              <button type="button" className="ghost" onClick={() => setNoteDetail(null)} aria-label="닫기">
-                ✕
-              </button>
-            </div>
-            <div className="muted small note-detail-meta">
-              {noteDetail.sender_id === user?.id ? (
-                <>받는 사람: {noteDetail.recipient?.name || noteDetail.recipient_id}</>
-              ) : (
-                <>보낸 사람: {noteDetail.sender?.name || noteDetail.sender_id}</>
-              )}
-              {" · "}
-              {new Date(noteDetail.created_at).toLocaleString()}
-              {noteDetail.is_read && noteDetail.read_at
-                ? ` · 읽음 ${new Date(noteDetail.read_at).toLocaleString()}`
-                : noteDetail.recipient_id === user?.id && noteDetail.is_read
-                  ? " · 읽음"
-                  : ""}
-            </div>
-            <div className="note-detail-body">{noteDetail.content}</div>
-            <div className="note-detail-actions">
-              <button type="button" className="secondary" onClick={() => setNoteDetail(null)}>
-                닫기
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
 
     </div>

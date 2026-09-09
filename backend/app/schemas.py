@@ -153,6 +153,8 @@ class NoteOut(BaseModel):
     created_at: datetime
     sender: EmployeeOut | None = None
     recipient: EmployeeOut | None = None
+    # All recipients in the same multi-send batch (populated on detail GET)
+    recipients: list[EmployeeOut] = []
 
     class Config:
         from_attributes = True
