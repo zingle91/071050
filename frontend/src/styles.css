@@ -197,7 +197,7 @@ button.ghost { background: transparent; color: #64748b; padding: 0.35rem 0.55rem
   z-index: 1100;
 }
 .org-picker-modal {
-  width: min(560px, 96vw);
+  width: min(1000px, 96vw);
   max-height: min(720px, 90vh);
   background: white;
   border-radius: 14px;
